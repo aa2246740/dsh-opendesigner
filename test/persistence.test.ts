@@ -180,6 +180,15 @@ describe("Persistence - agent batch worktrees", () => {
     assert.equal(stillWorks.success, true);
   });
 
+  it("does not attach a worktree to a parent git repo", async () => {
+    const nested = path.join(ROOT, "nested-not-root");
+    await emptyDir(nested);
+    const service = new OpenDesignerService({ projectRoot: nested, autoApprove: true });
+    const created = await service.executeTool("batch_create", { label: "parent-git" });
+    assert.equal(created.success, false);
+    assert.equal(created.code, "GIT_REQUIRED");
+  });
+
   it("creates, discards, and applies a jailed worktree without committing", async () => {
     await initGitRepo(gitDir);
     const service = new OpenDesignerService({ projectRoot: gitDir, autoApprove: false });

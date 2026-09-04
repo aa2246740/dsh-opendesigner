@@ -13,15 +13,17 @@ await fs.mkdir(projectRoot, { recursive: true });
 
 async function ensurePreviewGit(dir) {
   try {
-    await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: dir });
+    await fs.stat(path.join(dir, ".git"));
+    return;
   } catch {
-    await execFileAsync("git", ["init", "-b", "main"], { cwd: dir });
-    await execFileAsync(
-      "git",
-      ["-c", "user.email=preview@local", "-c", "user.name=OpenDesigner", "commit", "--allow-empty", "-m", "preview root"],
-      { cwd: dir }
-    );
+    // Create a nested git root for the preview fixture.
   }
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: dir });
+  await execFileAsync(
+    "git",
+    ["-c", "user.email=preview@local", "-c", "user.name=OpenDesigner", "commit", "--allow-empty", "-m", "preview root"],
+    { cwd: dir }
+  );
 }
 
 await ensurePreviewGit(projectRoot);

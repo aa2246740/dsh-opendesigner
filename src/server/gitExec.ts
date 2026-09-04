@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -23,9 +24,13 @@ export async function git(
 }
 
 export async function isGitRepo(cwd: string): Promise<boolean> {
+  return await isGitRoot(cwd);
+}
+
+export async function isGitRoot(cwd: string): Promise<boolean> {
   try {
-    const { stdout } = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
-    return stdout.trim() === "true";
+    const { stdout } = await git(cwd, ["rev-parse", "--show-toplevel"]);
+    return path.resolve(stdout.trim()) === path.resolve(cwd);
   } catch {
     return false;
   }
