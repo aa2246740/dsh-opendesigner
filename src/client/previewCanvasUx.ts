@@ -197,7 +197,7 @@ export function bindPreviewCanvasUx(
 
     if (event.shiftKey) {
       panel.selection.toggleSelect(nodeId);
-    } else {
+    } else if (!panel.selection.isSelected(nodeId)) {
       panel.select([nodeId]);
     }
 

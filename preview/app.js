@@ -2230,7 +2230,7 @@ var OpenDesignerPreview = (() => {
       }
       if (event.shiftKey) {
         panel.selection.toggleSelect(nodeId);
-      } else {
+      } else if (!panel.selection.isSelected(nodeId)) {
         panel.select([nodeId]);
       }
       if (panel.selection.getSelectedIds().length > 0) {
