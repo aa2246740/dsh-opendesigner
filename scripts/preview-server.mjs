@@ -79,8 +79,20 @@ const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-    const result = await service.executeTool(payload.tool, payload.args || {});
-    send(res, 200, JSON.stringify(result), MIME[".json"]);
+    try {
+      const result = await service.executeTool(payload.tool, payload.args || {});
+      send(res, 200, JSON.stringify(result), MIME[".json"]);
+    } catch (err) {
+      send(
+        res,
+        200,
+        JSON.stringify({
+          success: false,
+          error: err instanceof Error ? err.message : String(err)
+        }),
+        MIME[".json"]
+      );
+    }
     return;
   }
 

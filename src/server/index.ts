@@ -331,6 +331,9 @@ export class OpenDesignerService {
         if (code === "NOTHING_TO_REWIND" || code === "CHECKPOINT_NOT_FOUND") {
           return { success: false, error: err instanceof Error ? err.message : String(err), code };
         }
+        if (code === "ENOENT") {
+          return { success: false, error: err instanceof Error ? err.message : String(err), code: "NOT_FOUND" };
+        }
       }
       throw err;
     }

@@ -332,6 +332,10 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     const localEscape = await jailed.executeTool("local_read", { path: "../secrets.txt" });
     assert.equal(localEscape.success, false);
     assert.equal(localEscape.code, "PATH_JAIL");
+
+    const missing = await jailed.executeTool("project_read", { path: "src/does-not-exist.tsx" });
+    assert.equal(missing.success, false);
+    assert.equal(missing.code, "NOT_FOUND");
   });
 
   it("does not mark claims verified from a missing screenshot renderer", async () => {
