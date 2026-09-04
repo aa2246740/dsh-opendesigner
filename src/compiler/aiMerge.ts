@@ -1,7 +1,10 @@
 /**
  * Tier 2 AI 智能结构化代码合并器
  * 负责复杂逻辑变更、条件表达式、动态模板字符串及 Hooks 重构
+ * 接入 Babel AST 进行合并后语法复验与自动报错回滚
  */
+
+import { parse } from "@babel/parser";
 
 export interface CodePatchEdit {
   old_string: string;
@@ -49,7 +52,7 @@ export const SAVE_TO_CODE_JSON_SCHEMA = {
 };
 
 /**
- * 本地精确应用结构化补丁
+ * 本地精确应用结构化补丁，并执行 AST 语法复验防线
  */
 export function applySurgicalEdits(
   source: string,
@@ -86,6 +89,19 @@ export function applySurgicalEdits(
     } else {
       currentSource = currentSource.split(old_string).join(new_string);
     }
+  }
+
+  // 严格 AST 语法复验防线：一旦语法报错，自动回滚并拒绝应用
+  try {
+    parse(currentSource, {
+      sourceType: "module",
+      plugins: ["jsx", "typescript"]
+    });
+  } catch (err: any) {
+    return {
+      success: false,
+      error: `Syntax validation failed after applying edits: ${err.message}`
+    };
   }
 
   return { success: true, result: currentSource };

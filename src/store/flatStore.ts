@@ -1,7 +1,10 @@
 /**
  * 扁平化关系型组件存储库 (Flat Relational AST Store)
  * 借鉴 Lunagraph 核心设计，拒绝深层嵌套 JSON，以数据库范式建立索引
+ * 支持节点移动、子树克隆与循环引用安全校验
  */
+
+import { randomUUID } from "node:crypto";
 
 export type ElementType = "element" | "text" | "component" | "capture";
 
@@ -72,9 +75,43 @@ export class FlatStore {
   }
 
   /**
+   * 获取父级元素
+   */
+  public getParent(id: string): FEElement | undefined {
+    const parentId = this.state.parentByChild.get(id);
+    return parentId ? this.state.byId.get(parentId) : undefined;
+  }
+
+  /**
+   * 获取直接子节点列表
+   */
+  public getChildren(id: string): FEElement[] {
+    const childIds = this.state.childrenByParent.get(id) ?? [];
+    return childIds.map((cid) => this.state.byId.get(cid)).filter(Boolean) as FEElement[];
+  }
+
+  /**
    * 建立父子关联
    */
   public attachChild(parentId: string, childId: string, index?: number): void {
+    if (parentId === childId) {
+      throw new Error(`Cannot attach element to itself: ${parentId}`);
+    }
+
+    if (this.isDescendant(childId, parentId)) {
+      throw new Error(`Cycle detected: cannot attach ancestor ${childId} as child of descendant ${parentId}`);
+    }
+
+    // 先从原有父级脱离
+    const currentParentId = this.state.parentByChild.get(childId);
+    if (currentParentId) {
+      const oldSiblings = this.state.childrenByParent.get(currentParentId) ?? [];
+      this.state.childrenByParent.set(
+        currentParentId,
+        oldSiblings.filter((sId) => sId !== childId)
+      );
+    }
+
     const siblings = this.state.childrenByParent.get(parentId) ?? [];
     if (index !== undefined && index >= 0 && index <= siblings.length) {
       siblings.splice(index, 0, childId);
@@ -83,6 +120,108 @@ export class FlatStore {
     }
     this.state.childrenByParent.set(parentId, siblings);
     this.state.parentByChild.set(childId, parentId);
+  }
+
+  /**
+   * 检查 targetId 是否为 ancestorId 的后代节点（或自身）
+   */
+  public isDescendant(ancestorId: string, targetId: string): boolean {
+    if (ancestorId === targetId) return true;
+
+    let current: string | undefined = targetId;
+    const visited = new Set<string>();
+
+    while (current) {
+      if (visited.has(current)) break;
+      visited.add(current);
+
+      const parentId: string | undefined = this.state.parentByChild.get(current);
+      if (!parentId) break;
+      if (parentId === ancestorId) return true;
+      current = parentId;
+    }
+
+    return false;
+  }
+
+  /**
+   * 移动节点层级并附带循环引用安全校验
+   */
+  public moveElement(elementId: string, newParentId: string, index?: number): boolean {
+    if (!this.state.byId.has(elementId)) {
+      throw new Error(`Element not found: ${elementId}`);
+    }
+    if (!this.state.byId.has(newParentId)) {
+      throw new Error(`Target parent element not found: ${newParentId}`);
+    }
+
+    if (elementId === newParentId) {
+      throw new Error(`Cycle detected: cannot move element ${elementId} into itself`);
+    }
+
+    if (this.isDescendant(elementId, newParentId)) {
+      throw new Error(`Cycle detected: cannot move element ${elementId} into its own descendant ${newParentId}`);
+    }
+
+    this.attachChild(newParentId, elementId, index);
+    return true;
+  }
+
+  /**
+   * 深度克隆以 rootId 为根的整棵子树，自动重新生成 UUID
+   */
+  public cloneSubtree(
+    rootId: string,
+    idGenerator: (oldId: string) => string = () => randomUUID()
+  ): { rootId: string; clonedElements: FEElement[] } {
+    const originalSubtree = this.getSubtree(rootId);
+    if (originalSubtree.length === 0) {
+      throw new Error(`Subtree root element not found: ${rootId}`);
+    }
+
+    // 建立 ID 映射表
+    const idMap = new Map<string, string>();
+    for (const el of originalSubtree) {
+      idMap.set(el.id, idGenerator(el.id));
+    }
+
+    const clonedElements: FEElement[] = [];
+
+    // 克隆元素节点本体
+    for (const el of originalSubtree) {
+      const newId = idMap.get(el.id)!;
+      const cloned: FEElement = {
+        ...el,
+        id: newId,
+        props: JSON.parse(JSON.stringify(el.props)),
+        canvasRect: el.canvasRect ? { ...el.canvasRect } : undefined,
+        sourceLocation: el.sourceLocation ? { ...el.sourceLocation } : undefined
+      };
+      this.state.byId.set(newId, cloned);
+      clonedElements.push(cloned);
+    }
+
+    // 建立克隆后的层级关系
+    for (const el of originalSubtree) {
+      const newId = idMap.get(el.id)!;
+      const originalChildren = this.state.childrenByParent.get(el.id) ?? [];
+      const newChildren: string[] = [];
+
+      for (const childId of originalChildren) {
+        const newChildId = idMap.get(childId);
+        if (newChildId) {
+          newChildren.push(newChildId);
+          this.state.parentByChild.set(newChildId, newId);
+        }
+      }
+
+      this.state.childrenByParent.set(newId, newChildren);
+    }
+
+    return {
+      rootId: idMap.get(rootId)!,
+      clonedElements
+    };
   }
 
   /**
@@ -127,6 +266,28 @@ export class FlatStore {
     }
 
     return result;
+  }
+
+  /**
+   * 画布页面管理
+   */
+  public addPage(page: PageMeta): void {
+    this.state.pages.push(page);
+    if (!this.state.activePageId) {
+      this.state.activePageId = page.id;
+    }
+  }
+
+  public getPages(): PageMeta[] {
+    return this.state.pages;
+  }
+
+  public setActivePage(pageId: string): void {
+    this.state.activePageId = pageId;
+  }
+
+  public getActivePageId(): string {
+    return this.state.activePageId;
   }
 
   /**

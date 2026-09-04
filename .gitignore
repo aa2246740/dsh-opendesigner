@@ -8,3 +8,5 @@ out/
 *.log
 .DS_Store
 .designer/canvas.local.json
+test-fixtures/
+

@@ -1,7 +1,12 @@
 /**
  * dsh-opendesigner Web 客户端接入点
  * 遵循 DSH ModuleLoader 与 Web Bundle 规范
+ * 导出画布 2D 几何引擎、智能吸附与 next-shims 垫片
  */
+
+export * from "./geometry.ts";
+export * from "./snapping.ts";
+export * as NextShims from "./next-shims/index.ts";
 
 export interface DesignerClientState {
   zoom: number;

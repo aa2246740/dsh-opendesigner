@@ -2,9 +2,13 @@
  * Tier 1 确定性 Babel AST 字符串切片修改器
  * 核心特性：
  * 1. 毫秒级响应、零 AI 消耗
- * 2. 精准定位 JSXOpeningElement 的 className 或 style 属性
- * 3. 采用原生字符串 slice 切片拼接，100% 保持源码格式、单双引号与注释
+ * 2. 接入 @babel/parser 与 @babel/traverse 实现精准定位
+ * 3. 彻底修复 Tailwind 互斥类名合并算法缺陷（按类别词根槽位排他替换）
+ * 4. 采用无损字符串 slice 切片拼接，100% 保持源码格式、单双引号与注释
  */
+
+import { parse } from "@babel/parser";
+import traverse from "@babel/traverse";
 
 export interface SlicingEditRequest {
   sourceCode: string;
@@ -21,7 +25,141 @@ export interface SlicingEditResult {
 }
 
 /**
- * 确定性修改组件的 className
+ * 获取 Tailwind 类名 Token 的互斥分类槽位
+ * 如果两个 Token 属于同一个分类槽位，则互斥替换
+ */
+export function getTailwindCategory(token: string): string {
+  // 分离可能存在的修饰前缀（如 hover:, focus:, md:, dark: 等）
+  const colonIdx = token.lastIndexOf(":");
+  const prefix = colonIdx !== -1 ? token.slice(0, colonIdx + 1) : "";
+  const baseToken = colonIdx !== -1 ? token.slice(colonIdx + 1) : token;
+
+  // 1. 文本相关：细分颜色、字号、对齐、粗细、装饰
+  if (/^text-(xs|sm|base|lg|xl|[2-9]xl)$/.test(baseToken)) {
+    return `${prefix}text-size`;
+  }
+  if (/^text-(left|center|right|justify|start|end)$/.test(baseToken)) {
+    return `${prefix}text-align`;
+  }
+  if (/^text-/.test(baseToken)) {
+    return `${prefix}text-color`;
+  }
+  if (/^font-(thin|extralight|light|normal|medium|semibold|bold|extrabold|black)$/.test(baseToken)) {
+    return `${prefix}font-weight`;
+  }
+  if (/^font-(sans|serif|mono)$/.test(baseToken)) {
+    return `${prefix}font-family`;
+  }
+
+  // 2. 背景相关：细分颜色、尺寸、位置、重复
+  if (/^bg-(auto|cover|contain)$/.test(baseToken)) {
+    return `${prefix}bg-size`;
+  }
+  if (/^bg-(bottom|center|left|left-bottom|left-top|right|right-bottom|right-top|top)$/.test(baseToken)) {
+    return `${prefix}bg-position`;
+  }
+  if (/^bg-(repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space)$/.test(baseToken)) {
+    return `${prefix}bg-repeat`;
+  }
+  if (/^bg-/.test(baseToken)) {
+    return `${prefix}bg-color`;
+  }
+
+  // 3. 边框与圆角
+  if (/^rounded-(t|b|l|r|tl|tr|bl|br)(-.*)?$/.test(baseToken)) {
+    const side = baseToken.match(/^rounded-(t|b|l|r|tl|tr|bl|br)/)![1];
+    return `${prefix}rounded-${side}`;
+  }
+  if (/^rounded(-.*)?$/.test(baseToken)) {
+    return `${prefix}rounded`;
+  }
+  if (/^border-(solid|dashed|dotted|double|none|hidden)$/.test(baseToken)) {
+    return `${prefix}border-style`;
+  }
+  if (/^border-(t|b|l|r)(-\d+)?$/.test(baseToken)) {
+    const side = baseToken.match(/^border-(t|b|l|r)/)![1];
+    return `${prefix}border-width-${side}`;
+  }
+  if (/^border(-\d+)?$/.test(baseToken)) {
+    return `${prefix}border-width`;
+  }
+  if (/^border-/.test(baseToken)) {
+    return `${prefix}border-color`;
+  }
+
+  // 4. 内边距 (Padding) 与外边距 (Margin)
+  const spacingMatch = baseToken.match(/^(-?[mp][xytrbl]?)-/);
+  if (spacingMatch) {
+    return `${prefix}${spacingMatch[1]}`;
+  }
+
+  // 5. 尺寸与宽高
+  if (/^w-/.test(baseToken)) return `${prefix}w`;
+  if (/^h-/.test(baseToken)) return `${prefix}h`;
+  if (/^min-w-/.test(baseToken)) return `${prefix}min-w`;
+  if (/^max-w-/.test(baseToken)) return `${prefix}max-w`;
+  if (/^min-h-/.test(baseToken)) return `${prefix}min-h`;
+  if (/^max-h-/.test(baseToken)) return `${prefix}max-h`;
+
+  // 6. 布局模式与对齐
+  if (/^flex-(row|row-reverse|col|col-reverse)$/.test(baseToken)) return `${prefix}flex-direction`;
+  if (/^flex-(wrap|wrap-reverse|nowrap)$/.test(baseToken)) return `${prefix}flex-wrap`;
+  if (/^flex-(1|auto|initial|none)$/.test(baseToken) || /^grow(-.*)?$/.test(baseToken) || /^shrink(-.*)?$/.test(baseToken)) {
+    return `${prefix}flex-grow-shrink`;
+  }
+  if (/^(block|inline-block|inline|flex|inline-flex|grid|inline-grid|hidden)$/.test(baseToken)) {
+    return `${prefix}display`;
+  }
+  if (/^items-/.test(baseToken)) return `${prefix}items`;
+  if (/^justify-items-/.test(baseToken)) return `${prefix}justify-items`;
+  if (/^justify-/.test(baseToken)) return `${prefix}justify-content`;
+  if (/^gap-x-/.test(baseToken)) return `${prefix}gap-x`;
+  if (/^gap-y-/.test(baseToken)) return `${prefix}gap-y`;
+  if (/^gap-/.test(baseToken)) return `${prefix}gap`;
+
+  // 7. 定位体系
+  if (/^(static|fixed|absolute|relative|sticky)$/.test(baseToken)) return `${prefix}position`;
+  if (/^top-/.test(baseToken)) return `${prefix}top`;
+  if (/^right-/.test(baseToken)) return `${prefix}right`;
+  if (/^bottom-/.test(baseToken)) return `${prefix}bottom`;
+  if (/^left-/.test(baseToken)) return `${prefix}left`;
+  if (/^inset-/.test(baseToken)) return `${prefix}inset`;
+  if (/^z-/.test(baseToken)) return `${prefix}z-index`;
+
+  // 8. 效果与状态
+  if (/^shadow(-.*)?$/.test(baseToken)) return `${prefix}shadow`;
+  if (/^opacity-/.test(baseToken)) return `${prefix}opacity`;
+  if (/^cursor-/.test(baseToken)) return `${prefix}cursor`;
+  if (/^overflow-x-/.test(baseToken)) return `${prefix}overflow-x`;
+  if (/^overflow-y-/.test(baseToken)) return `${prefix}overflow-y`;
+  if (/^overflow-/.test(baseToken)) return `${prefix}overflow`;
+
+  // 兜底：按前缀划分
+  const dashIdx = baseToken.lastIndexOf("-");
+  return dashIdx > 0 ? `${prefix}${baseToken.slice(0, dashIdx + 1)}` : `${prefix}${baseToken}`;
+}
+
+/**
+ * 彻底修复的 Tailwind 类名 Token 合并算法
+ * 按 Tailwind 类别词根分组互斥替换，确保如 text-red-500 能被正确替换为 text-blue-500
+ */
+export function mergeTailwindTokens(existingClasses: string, tokensToAddOrReplace: string): string {
+  const existingTokens = existingClasses.split(/\s+/).filter(Boolean);
+  const incomingTokens = tokensToAddOrReplace.split(/\s+/).filter(Boolean);
+
+  let currentTokens = [...existingTokens];
+
+  for (const incomingToken of incomingTokens) {
+    const targetCategory = getTailwindCategory(incomingToken);
+    currentTokens = currentTokens.filter((t) => getTailwindCategory(t) !== targetCategory);
+    currentTokens.push(incomingToken);
+  }
+
+  return currentTokens.join(" ");
+}
+
+/**
+ * 基于精确切片区间的 className 更新
  */
 export function updateClassNameDeterministically(
   sourceCode: string,
@@ -34,7 +172,6 @@ export function updateClassNameDeterministically(
       return { ok: false, reason: "invalid-offset-bounds" };
     }
 
-    // 采用无损字符串切片拼接
     const prefix = sourceCode.slice(0, classStartOffset);
     const suffix = sourceCode.slice(classEndOffset);
     const newCode = prefix + updatedClassLiteral + suffix;
@@ -52,21 +189,151 @@ export function updateClassNameDeterministically(
 }
 
 /**
- * 合并或替换 Tailwind 类名 Token
- * 处理互斥类名（如替换 text-red-500 为 text-blue-500）
+ * 基于 Babel AST 精准行列号定位的源码就地切片更新
  */
-export function mergeTailwindTokens(existingClasses: string, tokenToAddOrReplace: string): string {
-  const existingTokens = existingClasses.split(/\s+/).filter(Boolean);
-  
-  // 简易前缀推断（如 'bg-', 'text-', 'p-', 'm-', 'rounded-'）
-  const getPrefix = (token: string) => {
-    const dashIdx = token.lastIndexOf("-");
-    return dashIdx > 0 ? token.slice(0, dashIdx + 1) : token;
-  };
+export function updateSourceCodeDeterministically(request: SlicingEditRequest): SlicingEditResult {
+  const { sourceCode, targetLine, targetColumn, newClassName, newStyleProp } = request;
 
-  const targetPrefix = getPrefix(tokenToAddOrReplace);
-  const filteredTokens = existingTokens.filter((t) => getPrefix(t) !== targetPrefix);
-  filteredTokens.push(tokenToAddOrReplace);
+  let ast: any;
+  try {
+    ast = parse(sourceCode, {
+      sourceType: "module",
+      plugins: ["jsx", "typescript"]
+    });
+  } catch (err: any) {
+    return { ok: false, reason: `parse-error: ${err.message}` };
+  }
 
-  return filteredTokens.join(" ");
+  // 寻找匹配的 JSXOpeningElement
+  let targetOpeningNode: any = null;
+  let minRange = Infinity;
+
+  const trav = (traverse as any).default || traverse;
+  trav(ast, {
+    JSXOpeningElement(path: any) {
+      const node = path.node;
+      const { start, end } = node.loc;
+
+      // 检查目标行列号是否在该 OpeningElement 范围内或在同一行
+      const matchesLine = start.line === targetLine || (start.line <= targetLine && end.line >= targetLine);
+      if (matchesLine) {
+        const range = node.end - node.start;
+        if (range < minRange) {
+          minRange = range;
+          targetOpeningNode = node;
+        }
+      }
+    }
+  });
+
+  if (!targetOpeningNode) {
+    return { ok: false, reason: `target-element-not-found at ${targetLine}:${targetColumn}` };
+  }
+
+  let workingCode = sourceCode;
+
+  // 1. 处理 className 修改
+  if (newClassName !== undefined) {
+    const classAttr = targetOpeningNode.attributes.find(
+      (attr: any) => attr.type === "JSXAttribute" && attr.name && attr.name.name === "className"
+    );
+
+    if (classAttr) {
+      // 如果已有 className
+      if (!classAttr.value || classAttr.value.type !== "StringLiteral") {
+        // 动态表达式（如 className={cn(...)}），安全降级
+        return { ok: false, reason: "not-literal" };
+      }
+
+      const existingClassStr = classAttr.value.value;
+      const merged = mergeTailwindTokens(existingClassStr, newClassName);
+      const raw = classAttr.value.extra?.raw || `"${existingClassStr}"`;
+      const quote = raw[0] === "'" ? "'" : '"';
+      const replacement = `${quote}${merged}${quote}`;
+
+      const res = updateClassNameDeterministically(
+        workingCode,
+        classAttr.value.start,
+        classAttr.value.end,
+        replacement
+      );
+      if (!res.ok) return res;
+      workingCode = res.code!;
+    } else {
+      // 无 className，在 openingElement 闭合前插入
+      const insertPos = targetOpeningNode.selfClosing
+        ? targetOpeningNode.end - 2
+        : targetOpeningNode.end - 1;
+
+      const insertion = ` className="${newClassName}"`;
+      workingCode = workingCode.slice(0, insertPos) + insertion + workingCode.slice(insertPos);
+    }
+  }
+
+  // 2. 处理 style 属性修改
+  if (newStyleProp !== undefined) {
+    const { key, value } = newStyleProp;
+    const formattedVal = typeof value === "string" ? `"${value}"` : `${value}`;
+
+    // 重新解析以获取准确偏移（若 className 修改改变了字符串长度）
+    const freshAst = parse(workingCode, { sourceType: "module", plugins: ["jsx", "typescript"] });
+    let freshNode: any = null;
+    let freshMinRange = Infinity;
+
+    trav(freshAst, {
+      JSXOpeningElement(path: any) {
+        const node = path.node;
+        const matchesLine = node.loc.start.line === targetLine || 
+          (node.loc.start.line <= targetLine && node.loc.end.line >= targetLine);
+        if (matchesLine) {
+          const range = node.end - node.start;
+          if (range < freshMinRange) {
+            freshMinRange = range;
+            freshNode = node;
+          }
+        }
+      }
+    });
+
+    if (!freshNode) freshNode = targetOpeningNode;
+
+    const styleAttr = freshNode.attributes.find(
+      (attr: any) => attr.type === "JSXAttribute" && attr.name && attr.name.name === "style"
+    );
+
+    if (styleAttr) {
+      if (
+        !styleAttr.value ||
+        styleAttr.value.type !== "JSXExpressionContainer" ||
+        styleAttr.value.expression.type !== "ObjectExpression"
+      ) {
+        return { ok: false, reason: "not-literal" };
+      }
+
+      const objExpr = styleAttr.value.expression;
+      const existingProp = objExpr.properties.find(
+        (p: any) => p.type === "ObjectProperty" && (p.key.name === key || p.key.value === key)
+      );
+
+      if (existingProp) {
+        workingCode =
+          workingCode.slice(0, existingProp.value.start) +
+          formattedVal +
+          workingCode.slice(existingProp.value.end);
+      } else {
+        // 在对象内部插入新属性
+        const insertPos = objExpr.end - 1;
+        const needsComma = objExpr.properties.length > 0;
+        const insertion = `${needsComma ? ", " : ""}${key}: ${formattedVal} `;
+        workingCode = workingCode.slice(0, insertPos) + insertion + workingCode.slice(insertPos);
+      }
+    } else {
+      // 插入 style 属性
+      const insertPos = freshNode.selfClosing ? freshNode.end - 2 : freshNode.end - 1;
+      const insertion = ` style={{ ${key}: ${formattedVal} }}`;
+      workingCode = workingCode.slice(0, insertPos) + insertion + workingCode.slice(insertPos);
+    }
+  }
+
+  return { ok: true, code: workingCode };
 }

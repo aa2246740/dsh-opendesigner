@@ -1,10 +1,11 @@
 /**
  * dsh-opendesigner 根入口
- * 导出核心编译器、扁平状态树、MCP 工具清单与客户端能力
+ * 导出核心编译器、扁平状态树、DSH 服务端与 MCP 工具清单、客户端能力
  */
 
-export * from "./compiler/sourceEdit.js";
-export * from "./compiler/aiMerge.js";
-export * from "./store/flatStore.js";
-export * from "./server/mcpTools.js";
-export * from "./client/index.js";
+export * from "./compiler/sourceEdit.ts";
+export * from "./compiler/aiMerge.ts";
+export * from "./compiler/astParser.ts";
+export * from "./store/flatStore.ts";
+export * from "./server/index.ts";
+export * from "./client/index.ts";

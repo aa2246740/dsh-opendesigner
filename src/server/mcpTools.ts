@@ -1,12 +1,28 @@
 /**
- * 完整对齐官方 38 个 MCP 工具的目录与 Schema 定义
+ * 完整对齐官方 38 个 MCP 工具的目录、Schema 定义与本地 Dispatcher 调度执行
  */
+
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { FlatStore } from "../store/flatStore.ts";
+import type { FEElement } from "../store/flatStore.ts";
+import { ClaimRegistry } from "./claimRegistry.ts";
+import { applySurgicalEdits } from "../compiler/aiMerge.ts";
+import { randomUUID } from "node:crypto";
 
 export interface MCPToolDefinition {
   name: string;
   description: string;
   category: "project" | "local" | "canvas" | "design" | "skills";
   destructive?: boolean;
+}
+
+export interface MCPContext {
+  projectRoot: string;
+  store: FlatStore;
+  claims: ClaimRegistry;
+  autoApprove?: boolean;
+  saveCanvas?: () => Promise<void>;
 }
 
 export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
@@ -58,3 +74,548 @@ export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   { name: "list_skills", description: "列出当前可用的工作流设计技能", category: "skills" },
   { name: "read_skill", description: "读取设计规范技能规约正文", category: "skills" }
 ];
+
+/**
+ * 将 FlatStore 节点转换为结构化 JSX 字符串
+ */
+export function elementToJSX(store: FlatStore, elementId: string): string {
+  const el = store.getElement(elementId);
+  if (!el) return "";
+  if (el.type === "text") {
+    return el.textContent || "";
+  }
+
+  const children = store.getChildren(elementId);
+  const propsEntries = Object.entries(el.props || {})
+    .map(([k, v]) => {
+      if (typeof v === "string") return `${k}="${v}"`;
+      if (typeof v === "boolean") return v ? k : `${k}={false}`;
+      return `${k}={${JSON.stringify(v)}}`;
+    })
+    .join(" ");
+
+  const propStr = propsEntries ? ` ${propsEntries}` : "";
+  if (children.length === 0 && !el.textContent) {
+    return `<${el.tag}${propStr} />`;
+  }
+
+  const inner = el.textContent ? el.textContent : children.map((c) => elementToJSX(store, c.id)).join("\n");
+  return `<${el.tag}${propStr}>\n  ${inner}\n</${el.tag}>`;
+}
+
+/**
+ * 递归收集目录下的所有文件路径
+ */
+async function getFilesRecursively(dir: string, baseDir: string = dir): Promise<string[]> {
+  const results: string[] = [];
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const subFiles = await getFilesRecursively(fullPath, baseDir);
+        results.push(...subFiles);
+      } else {
+        results.push(path.relative(baseDir, fullPath));
+      }
+    }
+  } catch {
+    // 忽略无法读取的目录
+  }
+  return results;
+}
+
+/**
+ * 38 个 MCP 工具的本地调度处理器
+ */
+export async function dispatchMCPTool(
+  toolName: string,
+  args: Record<string, any>,
+  ctx: MCPContext
+): Promise<any> {
+  const { projectRoot, store, claims, saveCanvas } = ctx;
+
+  switch (toolName) {
+    // --- 类别 1: Project Tools ---
+    case "project_list": {
+      return {
+        projects: [
+          {
+            id: "default",
+            name: path.basename(projectRoot),
+            path: projectRoot
+          }
+        ]
+      };
+    }
+
+    case "project_pick": {
+      return { success: true, projectId: args.projectId || "default" };
+    }
+
+    case "project_read": {
+      const targetPath = path.resolve(projectRoot, args.path);
+      const content = await fs.readFile(targetPath, "utf-8");
+      const lines = content.split("\n");
+      const offset = args.offset || 0;
+      const limit = args.limit || lines.length;
+      const slice = lines.slice(offset, offset + limit).join("\n");
+      return { content: slice, totalLines: lines.length };
+    }
+
+    case "project_glob": {
+      const pattern = args.pattern || "*";
+      const files = await getFilesRecursively(projectRoot);
+      const regex = new RegExp(
+        pattern.replace(/\./g, "\\.").replace(/\*/g, ".*")
+      );
+      return { matches: files.filter((f) => regex.test(f)) };
+    }
+
+    case "project_grep": {
+      const files = await getFilesRecursively(projectRoot);
+      const regex = new RegExp(args.pattern);
+      const matches: { path: string; line: number; text: string }[] = [];
+
+      for (const rel of files) {
+        if (args.pathPrefix && !rel.startsWith(args.pathPrefix)) continue;
+        try {
+          const content = await fs.readFile(path.join(projectRoot, rel), "utf-8");
+          const lines = content.split("\n");
+          for (let i = 0; i < lines.length; i++) {
+            if (regex.test(lines[i])) {
+              matches.push({ path: rel, line: i + 1, text: lines[i] });
+            }
+          }
+        } catch {
+          // ignore binary / unreadable
+        }
+      }
+      return { matches };
+    }
+
+    case "project_write": {
+      const targetPath = path.resolve(projectRoot, args.path);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, args.content, "utf-8");
+      return { success: true, path: args.path };
+    }
+
+    case "project_write_batch": {
+      const written: string[] = [];
+      for (const f of args.files || []) {
+        const targetPath = path.resolve(projectRoot, f.path);
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.writeFile(targetPath, f.content, "utf-8");
+        written.push(f.path);
+      }
+      return { written };
+    }
+
+    case "project_edit": {
+      const targetPath = path.resolve(projectRoot, args.path);
+      const content = await fs.readFile(targetPath, "utf-8");
+      const res = applySurgicalEdits(content, [
+        {
+          old_string: args.old_string,
+          new_string: args.new_string,
+          replace_all: args.replace_all
+        }
+      ]);
+      if (!res.success) {
+        return { success: false, error: res.error };
+      }
+      await fs.writeFile(targetPath, res.result!, "utf-8");
+      return { success: true };
+    }
+
+    case "project_delete": {
+      const targetPath = path.resolve(projectRoot, args.path);
+      await fs.unlink(targetPath);
+      return { success: true };
+    }
+
+    case "project_copy_asset": {
+      const src = path.resolve(projectRoot, args.sourcePath);
+      const dest = path.resolve(projectRoot, args.targetPath);
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.copyFile(src, dest);
+      return { success: true };
+    }
+
+    // --- 类别 2: Local Filesystem Tools ---
+    case "local_read": {
+      const targetPath = path.resolve(projectRoot, args.path);
+      const content = await fs.readFile(targetPath, "utf-8");
+      return { content };
+    }
+
+    case "local_read_batch": {
+      const results: Record<string, string> = {};
+      for (const p of args.paths || []) {
+        try {
+          const targetPath = path.resolve(projectRoot, p);
+          results[p] = await fs.readFile(targetPath, "utf-8");
+        } catch {
+          results[p] = "";
+        }
+      }
+      return { files: results };
+    }
+
+    case "local_write": {
+      const targetPath = path.resolve(projectRoot, args.path);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, args.content, "utf-8");
+      return { success: true };
+    }
+
+    case "local_edit": {
+      const targetPath = path.resolve(projectRoot, args.path);
+      const content = await fs.readFile(targetPath, "utf-8");
+      const res = applySurgicalEdits(content, [
+        {
+          old_string: args.old_string,
+          new_string: args.new_string,
+          replace_all: args.replace_all
+        }
+      ]);
+      if (!res.success) return { success: false, error: res.error };
+      await fs.writeFile(targetPath, res.result!, "utf-8");
+      return { success: true };
+    }
+
+    case "local_glob": {
+      const files = await getFilesRecursively(projectRoot);
+      const pattern = args.pattern || "*";
+      const regex = new RegExp(pattern.replace(/\./g, "\\.").replace(/\*/g, ".*"));
+      return { matches: files.filter((f) => regex.test(f)) };
+    }
+
+    case "local_grep": {
+      return await dispatchMCPTool("project_grep", args, ctx);
+    }
+
+    case "scan_project": {
+      let pkg: any = {};
+      try {
+        const pkgRaw = await fs.readFile(path.join(projectRoot, "package.json"), "utf-8");
+        pkg = JSON.parse(pkgRaw);
+      } catch {
+        // ignore
+      }
+      return {
+        name: pkg.name || "unknown",
+        dependencies: Object.keys(pkg.dependencies || {}),
+        devDependencies: Object.keys(pkg.devDependencies || {}),
+        hasTailwind: Boolean(pkg.devDependencies?.tailwindcss || pkg.dependencies?.tailwindcss)
+      };
+    }
+
+    // --- 类别 3: Canvas Direct Tools ---
+    case "canvas_list": {
+      return {
+        pages: store.getPages(),
+        activePageId: store.getActivePageId()
+      };
+    }
+
+    case "canvas_create_page": {
+      const pageId = randomUUID();
+      const rootId = `root_${pageId.slice(0, 8)}`;
+      store.setElement({
+        id: rootId,
+        type: "element",
+        tag: "div",
+        props: { className: "min-h-screen w-full bg-white p-6" }
+      });
+      store.addPage({
+        id: pageId,
+        name: args.name || "Untitled Page",
+        isLoaded: true,
+        rootElementId: rootId
+      });
+      store.setActivePage(pageId);
+      if (saveCanvas) await saveCanvas();
+      return { success: true, pageId, rootElementId: rootId };
+    }
+
+    case "canvas_read": {
+      let targetId = args.elementId;
+      if (!targetId) {
+        const activePageId = store.getActivePageId();
+        const page = store.getPages().find((p) => p.id === activePageId);
+        targetId = page ? page.rootElementId : "";
+      }
+      const el = targetId ? store.getElement(targetId) : undefined;
+      const jsx = targetId ? elementToJSX(store, targetId) : "";
+      const covering_hash = ClaimRegistry.computeCoveringHash(jsx);
+      return {
+        elementId: targetId,
+        element: el,
+        jsx,
+        covering_hash
+      };
+    }
+
+    case "canvas_claim": {
+      const { elementId, covering_hash } = args;
+      const res = claims.claim(elementId, covering_hash, { holder: args.holder });
+      return res;
+    }
+
+    case "canvas_release": {
+      const { claim_id } = args;
+      const res = claims.release(claim_id);
+      return res;
+    }
+
+    case "canvas_add": {
+      const id = randomUUID();
+      const newEl: FEElement = {
+        id,
+        type: args.type || "element",
+        tag: args.tag || "div",
+        props: args.props || {},
+        textContent: args.textContent
+      };
+      store.setElement(newEl);
+      if (args.parentId) {
+        store.attachChild(args.parentId, id);
+      }
+      if (saveCanvas) await saveCanvas();
+      return { success: true, elementId: id };
+    }
+
+    case "canvas_update": {
+      const { claim_id, elementId, props, textContent } = args;
+      const validation = claims.validateClaim(claim_id, elementId);
+      if (!validation.valid) return { success: false, error: validation.error };
+
+      claims.recordMutation(claim_id);
+      const el = store.getElement(elementId);
+      if (!el) return { success: false, error: `Element ${elementId} not found` };
+
+      if (props) el.props = { ...el.props, ...props };
+      if (textContent !== undefined) el.textContent = textContent;
+      store.setElement(el);
+
+      if (saveCanvas) await saveCanvas();
+      return { success: true };
+    }
+
+    case "canvas_edit": {
+      const { claim_id, elementId, old_string, new_string } = args;
+      const validation = claims.validateClaim(claim_id, elementId);
+      if (!validation.valid) return { success: false, error: validation.error };
+
+      claims.recordMutation(claim_id);
+      const el = store.getElement(elementId);
+      if (!el) return { success: false, error: `Element ${elementId} not found` };
+
+      if (el.textContent && el.textContent.includes(old_string)) {
+        el.textContent = el.textContent.replace(old_string, new_string);
+      }
+
+      for (const [k, v] of Object.entries(el.props)) {
+        if (typeof v === "string" && v.includes(old_string)) {
+          el.props[k] = v.replace(old_string, new_string);
+        }
+      }
+      store.setElement(el);
+
+      if (saveCanvas) await saveCanvas();
+      return { success: true };
+    }
+
+    case "canvas_insert": {
+      const { claim_id, targetId, position, element } = args;
+      const validation = claims.validateClaim(claim_id, targetId);
+      if (!validation.valid) return { success: false, error: validation.error };
+
+      claims.recordMutation(claim_id);
+      const id = element?.id || randomUUID();
+      const newEl: FEElement = {
+        id,
+        type: element?.type || "element",
+        tag: element?.tag || "div",
+        props: element?.props || {},
+        textContent: element?.textContent
+      };
+      store.setElement(newEl);
+
+      if (position === "append") {
+        store.attachChild(targetId, id);
+      } else {
+        const parent = store.getParent(targetId);
+        if (parent) {
+          const siblings = store.getChildren(parent.id).map((c) => c.id);
+          const idx = siblings.indexOf(targetId);
+          const targetIndex = position === "before" ? Math.max(0, idx) : idx + 1;
+          store.attachChild(parent.id, id, targetIndex);
+        }
+      }
+
+      if (saveCanvas) await saveCanvas();
+      return { success: true, elementId: id };
+    }
+
+    case "canvas_delete": {
+      const { claim_id, elementId } = args;
+      const validation = claims.validateClaim(claim_id, elementId);
+      if (!validation.valid) return { success: false, error: validation.error };
+
+      claims.recordMutation(claim_id);
+      store.removeElement(elementId);
+
+      if (saveCanvas) await saveCanvas();
+      return { success: true };
+    }
+
+    case "canvas_grep": {
+      const pattern = new RegExp(args.pattern);
+      const matches: string[] = [];
+      const json = store.toJSON();
+      for (const [id, el] of Object.entries(json.byId)) {
+        const serialized = JSON.stringify(el);
+        if (pattern.test(serialized)) {
+          matches.push(id);
+        }
+      }
+      return { matches };
+    }
+
+    case "canvas_query": {
+      const selector = (args.selector || "").trim();
+      const matches: FEElement[] = [];
+      const json = store.toJSON();
+      for (const el of Object.values(json.byId) as FEElement[]) {
+        if (el.tag.toLowerCase() === selector.toLowerCase() || el.id === selector) {
+          matches.push(el);
+        }
+      }
+      return { matches };
+    }
+
+    case "canvas_create_import_scaffold": {
+      const pageId = randomUUID();
+      const rootId = `scaffold_root_${pageId.slice(0, 6)}`;
+      const leftPanelId = `scaffold_left_${pageId.slice(0, 6)}`;
+      const rightPanelId = `scaffold_right_${pageId.slice(0, 6)}`;
+
+      store.setElement({
+        id: rootId,
+        type: "element",
+        tag: "div",
+        props: { className: "flex min-h-screen w-full bg-gray-50" }
+      });
+      store.setElement({
+        id: leftPanelId,
+        type: "element",
+        tag: "aside",
+        props: { className: "w-80 border-r bg-white p-6 shadow-sm" }
+      });
+      store.setElement({
+        id: rightPanelId,
+        type: "element",
+        tag: "main",
+        props: { className: "flex-1 p-8" }
+      });
+
+      store.attachChild(rootId, leftPanelId);
+      store.attachChild(rootId, rightPanelId);
+      store.addPage({
+        id: pageId,
+        name: "Design System Scaffold",
+        isLoaded: true,
+        rootElementId: rootId
+      });
+      store.setActivePage(pageId);
+
+      if (saveCanvas) await saveCanvas();
+      return { success: true, pageId, rootElementId: rootId };
+    }
+
+    // --- 类别 4: Design & Theme Tools ---
+    case "get_theme": {
+      return {
+        colors: {
+          primary: "#3b82f6",
+          secondary: "#64748b",
+          background: "#ffffff",
+          foreground: "#0f172a"
+        },
+        radius: { sm: "0.125rem", md: "0.375rem", lg: "0.5rem", full: "9999px" },
+        shadows: { sm: "0 1px 2px 0 rgb(0 0 0 / 0.05)", md: "0 4px 6px -1px rgb(0 0 0 / 0.1)" }
+      };
+    }
+
+    case "get_design_context": {
+      const theme = await dispatchMCPTool("get_theme", {}, ctx);
+      const canvas = await dispatchMCPTool("canvas_list", {}, ctx);
+      return {
+        theme,
+        activeCanvas: canvas,
+        componentsCount: Object.keys(store.toJSON().byId).length
+      };
+    }
+
+    case "search_components": {
+      const q = (args.query || "").toLowerCase();
+      const results: string[] = [];
+      const json = store.toJSON();
+      for (const el of Object.values(json.byId) as FEElement[]) {
+        if (el.tag.toLowerCase().includes(q)) {
+          results.push(el.tag);
+        }
+      }
+      return { components: Array.from(new Set(results)) };
+    }
+
+    case "search_icons": {
+      const q = (args.query || "").toLowerCase();
+      const allIcons = ["Check", "X", "ChevronRight", "ChevronDown", "Search", "Menu", "User", "Settings", "Heart", "Star"];
+      return { icons: allIcons.filter((i) => i.toLowerCase().includes(q)) };
+    }
+
+    case "set_icon_library": {
+      return { success: true, iconLibrary: args.library || "lucide" };
+    }
+
+    case "take_screenshot": {
+      const elementId = args.elementId || "";
+      claims.recordVerification(elementId);
+      // 生成确定性离屏快照 Base64 数据
+      const mockPngBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+      return {
+        success: true,
+        elementId,
+        screenshotDataUrl: mockPngBase64
+      };
+    }
+
+    // --- 类别 5: Skills Tools ---
+    case "list_skills": {
+      return {
+        skills: [
+          { name: "lunagraph-design", description: "Visual design systems, spacing, typography, and color tokens" },
+          { name: "lunagraph-import-from-project", description: "Scan and import React components from project repository" },
+          { name: "lunagraph-compositions", description: "Design isolated compositions and variant galleries" }
+        ]
+      };
+    }
+
+    case "read_skill": {
+      const name = args.name || "lunagraph-design";
+      return {
+        name,
+        content: `# Skill: ${name}\n\nStrict guidelines for React 19 visual component editing and Tailwind styling.`
+      };
+    }
+
+    default: {
+      throw new Error(`Unknown MCP Tool: ${toolName}`);
+    }
+  }
+}

@@ -3,10 +3,15 @@
   "version": "0.1.0",
   "description": "An open-source, multi-model, local-first visual React component designer for DeepSeek Harness (inspired by Lunagraph)",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./src/index.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./client": "./dist/client.js"
+    ".": "./src/index.ts",
+    "./client": "./src/client/index.ts",
+    "./server": "./src/server/index.ts",
+    "./compiler": "./src/compiler/sourceEdit.ts",
+    "./store": "./src/store/flatStore.ts",
+    "./next-shims": "./src/client/next-shims/index.ts",
+    "./next-shims/*": "./src/client/next-shims/*.ts"
   },
   "scripts": {
     "build": "tsc -b",
