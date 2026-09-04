@@ -1,7 +1,8 @@
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import * as path from "node:path";
+import * as fs from "node:fs";
 import type { MCPToolDefinition } from "./mcpTools.ts";
-
-const require = createRequire(import.meta.url);
 
 export interface DshToolParameters {
   [key: string]: Record<string, unknown>;
@@ -62,17 +63,19 @@ function convertNode(spec: Record<string, unknown>, required: boolean): Record<s
   const node: Record<string, unknown> = { ...spec };
   if (required) node.required = true;
 
-  if (spec.type === "object" && spec.properties && typeof spec.properties === "object") {
-    const nestedRequired = new Set<string>(
-      Array.isArray(spec.required) ? (spec.required as string[]) : []
-    );
-    const nested: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(spec.properties as Record<string, Record<string, unknown>>)) {
-      nested[key] = convertNode(child, nestedRequired.has(key));
-    }
-    node.properties = nested;
+  if (spec.type === "object") {
     if (spec.additionalProperties === undefined) {
       node.additionalProperties = true;
+    }
+    if (spec.properties && typeof spec.properties === "object") {
+      const nestedRequired = new Set<string>(
+        Array.isArray(spec.required) ? (spec.required as string[]) : []
+      );
+      const nested: Record<string, unknown> = {};
+      for (const [key, child] of Object.entries(spec.properties as Record<string, Record<string, unknown>>)) {
+        nested[key] = convertNode(child, nestedRequired.has(key));
+      }
+      node.properties = nested;
     }
     delete node.required;
     if (required) node.required = true;
@@ -85,14 +88,42 @@ function convertNode(spec: Record<string, unknown>, required: boolean): Record<s
   return node;
 }
 
-export function wrapDefineTool(def: DshToolDefinition): unknown {
-  try {
-    const mod = require("@deepseek-ai/dsh-tools") as { defineTool?: (d: unknown) => unknown };
-    if (typeof mod.defineTool === "function") {
-      return mod.defineTool(def);
+function defineToolResolvers(): string[] {
+  const bases = [import.meta.url, pathToFileURL(path.join(process.cwd(), "package.json")).href];
+  const home = process.env.DSH_HOME;
+  if (home) {
+    try {
+      for (const entry of fs.readdirSync(path.join(home, "profiles"), { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          bases.push(pathToFileURL(path.join(home, "profiles", entry.name, "package.json")).href);
+        }
+      }
+    } catch {
+      // Isolated tests have no DSH_HOME profiles.
     }
-  } catch {
-    // Host tests and standalone runs do not have the DSH tools package.
+  }
+  return bases;
+}
+
+function loadDefineTool(): ((def: unknown) => unknown) | undefined {
+  for (const base of defineToolResolvers()) {
+    try {
+      const req = createRequire(base);
+      const mod = req("@deepseek-ai/dsh-tools") as { defineTool?: (d: unknown) => unknown };
+      if (typeof mod.defineTool === "function") {
+        return mod.defineTool.bind(mod);
+      }
+    } catch {
+      // Keep walking. The host package is a peer, not always next to this file.
+    }
+  }
+  return undefined;
+}
+
+export function wrapDefineTool(def: DshToolDefinition): unknown {
+  const defineTool = loadDefineTool();
+  if (defineTool) {
+    return defineTool(def);
   }
   return def;
 }

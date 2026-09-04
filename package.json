@@ -91,5 +91,8 @@
     "@babel/parser": "^7.26.0",
     "@babel/traverse": "^7.26.0",
     "@babel/types": "^7.26.0"
+  },
+  "optionalDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1"
   }
 }

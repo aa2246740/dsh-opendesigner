@@ -45,6 +45,25 @@ describe("Server - DSH plugin form", () => {
     assert.ok(Array.isArray(listRes.pages));
   });
 
+  it("wraps tools with defineTool so output.schema is JSON Schema", async () => {
+    const registeredTools = new Map<string, any>();
+    apply(
+      {
+        tools: {
+          register: (tool: any) => {
+            registeredTools.set(tool.name, tool);
+          }
+        }
+      },
+      { projectRoot: CORDIS_TEST_DIR, autoApprove: true }
+    );
+    const status = registeredTools.get("opendesigner_status");
+    assert.ok(status);
+    assert.notEqual(status.output?.schema?.type, "json");
+    const write = registeredTools.get("opendesigner_project_write");
+    assert.equal(write.parameters?.type, "object");
+  });
+
   it("saves canvas on stop", async () => {
     const service = new OpenDesignerService({ projectRoot: CORDIS_TEST_DIR });
     service.store.setElement({
