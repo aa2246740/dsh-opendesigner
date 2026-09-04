@@ -101,6 +101,7 @@ export class OpenDesignerService extends Service {
         name: tool.name,
         description: tool.description,
         category: tool.category,
+        parameters: tool.parameters,
         execute: async (args: Record<string, any>) => {
           return await this.executeTool(tool.name, args);
         }
@@ -113,6 +114,9 @@ export class OpenDesignerService extends Service {
    */
   public async start(): Promise<void> {
     await this.init();
+    if (this.ctx && this.ctx.tools) {
+      this.mountDshTools(this.ctx.tools);
+    }
   }
 
   /**
@@ -161,11 +165,16 @@ export class OpenDesignerService extends Service {
 
   /**
    * 获取本地 Git 工作区同步状态
-   * 严格遵守安全红线：使用 GIT_CONFIG_GLOBAL=/dev/null，仅检查当前 projectRoot
+   * 严格遵守安全红线：完全隔离全局与外部配置，仅检查当前 projectRoot
    */
   public async getGitStatus(): Promise<GitSyncStatus> {
     try {
-      const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" };
+      const env = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        XDG_CONFIG_HOME: "/dev/null"
+      };
       const { stdout: branchOut } = await execFileAsync(
         "git",
         ["rev-parse", "--abbrev-ref", "HEAD"],
@@ -209,7 +218,12 @@ export class OpenDesignerService extends Service {
 
     if (options.stageCanvas) {
       try {
-        const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" };
+        const env = {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          XDG_CONFIG_HOME: "/dev/null"
+        };
         await execFileAsync("git", ["add", ".designer/canvas.json"], {
           cwd: this.projectRoot,
           env

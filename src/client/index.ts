@@ -16,24 +16,30 @@ export * as NextShims from "./next-shims/index.ts";
 import { InfiniteCanvasViewport } from "./canvas.ts";
 import { SelectionManager } from "./selection.ts";
 import { ComponentSandbox } from "./sandbox.ts";
+import { CanvasPanel } from "./canvas/index.ts";
+import { FlatStore } from "../store/flatStore.ts";
 
 export interface DesignerClientState {
   viewport: InfiniteCanvasViewport;
   selection: SelectionManager;
   sandbox: ComponentSandbox;
+  panel: CanvasPanel;
   selectedElementIds: string[];
   hoveredElementId: string | null;
 }
 
 export function initDesignerClient(): DesignerClientState {
-  const viewport = new InfiniteCanvasViewport();
-  const selection = new SelectionManager();
-  const sandbox = new ComponentSandbox();
+  const store = new FlatStore();
+  const panel = new CanvasPanel({ store });
+  const viewport = panel.viewport;
+  const selection = panel.selection;
+  const sandbox = panel.sandbox;
 
   return {
     viewport,
     selection,
     sandbox,
+    panel,
     selectedElementIds: [],
     hoveredElementId: null
   };
@@ -51,7 +57,8 @@ if (typeof window !== "undefined") {
         init: initDesignerClient,
         InfiniteCanvasViewport,
         SelectionManager,
-        ComponentSandbox
+        ComponentSandbox,
+        CanvasPanel
       })
     });
   }

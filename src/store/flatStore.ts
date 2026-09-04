@@ -269,6 +269,19 @@ export class FlatStore {
   }
 
   /**
+   * 获取所有无父级的顶层根节点 ID
+   */
+  public getRootIds(): string[] {
+    const rootIds: string[] = [];
+    for (const id of this.state.byId.keys()) {
+      if (!this.state.parentByChild.has(id)) {
+        rootIds.push(id);
+      }
+    }
+    return rootIds;
+  }
+
+  /**
    * 画布页面管理
    */
   public addPage(page: PageMeta): void {

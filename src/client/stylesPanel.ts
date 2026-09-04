@@ -84,7 +84,7 @@ export class StylesPanelManager {
       else if (t.startsWith("my-")) styles.marginY = t.replace("my-", "");
       else if (t.startsWith("m-")) styles.margin = t.replace("m-", "");
       // 文字
-      else if (/^text-(xs|sm|base|lg|xl|[2-9]xl)$/.test(t)) styles.textSize = t.replace("text-", "");
+      else if (/^text-(xs|sm|base|lg|xl|[2-9]xl|\[\d+[^\]]*\])$/.test(t)) styles.textSize = t.replace("text-", "");
       else if (/^font-(thin|light|normal|medium|semibold|bold|extrabold|black)$/.test(t)) styles.fontWeight = t.replace("font-", "");
       else if (/^text-(left|center|right|justify)$/.test(t)) styles.textAlign = t.replace("text-", "") as any;
       else if (t.startsWith("text-") && !t.startsWith("text-opacity-")) styles.textColor = t.replace("text-", "");
@@ -92,8 +92,9 @@ export class StylesPanelManager {
       else if (t.startsWith("bg-") && !t.startsWith("bg-opacity-")) styles.backgroundColor = t.replace("bg-", "");
       else if (t.startsWith("opacity-")) styles.opacity = t.replace("opacity-", "");
       // 边框与圆角
-      else if (t === "border" || /^border-\d+$/.test(t)) styles.borderWidth = t === "border" ? "1" : t.replace("border-", "");
-      else if (t.startsWith("border-") && !t.startsWith("border-opacity-")) styles.borderColor = t.replace("border-", "");
+      else if (t === "border" || /^border-(\d+|\[\d+[^\]]*\])$/.test(t)) styles.borderWidth = t === "border" ? "1" : t.replace("border-", "");
+      else if (t === "border-none") styles.borderWidth = "0";
+      else if (t.startsWith("border-") && !t.startsWith("border-opacity-") && !/^(border-(solid|dashed|dotted|double|none|hidden))$/.test(t)) styles.borderColor = t.replace("border-", "");
       else if (t.startsWith("rounded")) styles.borderRadius = t === "rounded" ? "DEFAULT" : t.replace("rounded-", "");
       // 阴影
       else if (t.startsWith("shadow")) styles.shadow = t === "shadow" ? "DEFAULT" : t.replace("shadow-", "");
@@ -165,16 +166,16 @@ export class StylesPanelManager {
         token = `opacity-${value}`;
         break;
       case "borderWidth":
-        token = value === "1" ? "border" : value === "0" ? "border-0" : `border-${value}`;
+        token = value === "1" ? "border" : value === "0" || value === "none" ? "border-0" : `border-${value}`;
         break;
       case "borderColor":
         token = `border-${value}`;
         break;
       case "borderRadius":
-        token = value === "DEFAULT" ? "rounded" : `rounded-${value}`;
+        token = value === "DEFAULT" ? "rounded" : value === "none" ? "rounded-none" : `rounded-${value}`;
         break;
       case "shadow":
-        token = value === "DEFAULT" ? "shadow" : `shadow-${value}`;
+        token = value === "DEFAULT" ? "shadow" : value === "none" ? "shadow-none" : `shadow-${value}`;
         break;
     }
 
@@ -286,13 +287,26 @@ export class StylesPanelManager {
             options: [
               { label: "无", value: "none", className: "rounded-none" },
               { label: "小 (sm)", value: "sm", className: "rounded-sm" },
+              { label: "默认 (rounded)", value: "DEFAULT", className: "rounded" },
               { label: "中 (md)", value: "md", className: "rounded-md" },
               { label: "大 (lg)", value: "lg", className: "rounded-lg" },
               { label: "超大 (xl)", value: "xl", className: "rounded-xl" },
               { label: "胶囊 (full)", value: "full", className: "rounded-full" }
             ]
           },
-          { name: "borderWidth", label: "边框粗细", type: "select", currentValue: parsed.borderWidth || "0" },
+          {
+            name: "borderWidth",
+            label: "边框粗细",
+            type: "select",
+            currentValue: parsed.borderWidth || "0",
+            options: [
+              { label: "无 (0)", value: "0", className: "border-0" },
+              { label: "1px", value: "1", className: "border" },
+              { label: "2px", value: "2", className: "border-2" },
+              { label: "4px", value: "4", className: "border-4" },
+              { label: "8px", value: "8", className: "border-8" }
+            ]
+          },
           { name: "borderColor", label: "边框颜色", type: "color", currentValue: parsed.borderColor || "" },
           {
             name: "shadow",
@@ -302,6 +316,7 @@ export class StylesPanelManager {
             options: [
               { label: "无", value: "none", className: "shadow-none" },
               { label: "微阴影 (sm)", value: "sm", className: "shadow-sm" },
+              { label: "默认 (shadow)", value: "DEFAULT", className: "shadow" },
               { label: "普通 (md)", value: "md", className: "shadow-md" },
               { label: "大阴影 (lg)", value: "lg", className: "shadow-lg" },
               { label: "超大 (xl)", value: "xl", className: "shadow-xl" }

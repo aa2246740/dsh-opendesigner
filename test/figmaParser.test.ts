@@ -2,11 +2,16 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   KiwiReader,
+  KiwiWriter,
+  packKiwiBinary,
+  unpackKiwiBinary,
   figmaColorToTailwind,
   figmaNodeToTailwindClasses,
   buildSceneIndex,
   sceneToFlatStore,
   parseFigmaClipboard,
+  figmaToReact19,
+  importFigmaToStore,
   type FigmaNode
 } from "../src/compiler/figmaParser.ts";
 
@@ -178,5 +183,169 @@ describe("Compiler - Figma Kiwi Binary Protocol & Tailwind Mapping", () => {
     assert.equal(res.success, true);
     assert.equal(res.elements.length, 1);
     assert.ok(res.jsx.includes("div"));
+  });
+
+  it("should round-trip encode and decode Kiwi binary streams with KiwiWriter and KiwiReader", () => {
+    const writer = new KiwiWriter();
+    writer.writeHeader("figma");
+    writer.writeVarUint(65535);
+    writer.writeVarInt(-12345);
+    writer.writeFloat32(3.14159);
+    writer.writeString("OpenDesigner-Figma-Engine");
+
+    const bytes = writer.toUint8Array();
+    const reader = new KiwiReader(bytes);
+
+    assert.equal(reader.checkHeader(), true);
+    assert.equal(reader.readVarUint(), 65535);
+    assert.equal(reader.readVarInt(), -12345);
+    assert.ok(Math.abs(reader.readFloat32() - 3.14159) < 0.0001);
+    assert.equal(reader.readString(), "OpenDesigner-Figma-Engine");
+    assert.equal(reader.isEOF(), true);
+  });
+
+  it("should pack and unpack FigmaNode scene tree to/from binary buffer via packKiwiBinary and unpackKiwiBinary", () => {
+    const inputNodes: FigmaNode[] = [
+      {
+        id: "hero_banner",
+        name: "HeroBanner",
+        type: "FRAME",
+        stackMode: "VERTICAL",
+        itemSpacing: 16,
+        paddingLeft: 24,
+        paddingRight: 24,
+        paddingTop: 32,
+        paddingBottom: 32,
+        cornerRadius: 12,
+        fills: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 1 } }]
+      },
+      {
+        id: "hero_title",
+        name: "Title",
+        type: "TEXT",
+        parentId: "hero_banner",
+        characters: "Welcome to OpenDesigner",
+        fontSize: 24,
+        fontWeight: 700,
+        fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1, a: 1 } }]
+      }
+    ];
+
+    const binary = packKiwiBinary(inputNodes, "figma");
+    assert.ok(binary instanceof Uint8Array);
+    assert.ok(binary.length > 30);
+
+    const unpacked = unpackKiwiBinary(binary);
+    assert.equal(unpacked.length, 2);
+    assert.equal(unpacked[0].id, "hero_banner");
+    assert.equal(unpacked[0].name, "HeroBanner");
+    assert.equal(unpacked[0].type, "FRAME");
+    assert.equal(unpacked[0].stackMode, "VERTICAL");
+    assert.equal(unpacked[0].itemSpacing, 16);
+    assert.equal(unpacked[0].paddingTop, 32);
+    assert.equal(unpacked[0].cornerRadius, 12);
+
+    assert.equal(unpacked[1].id, "hero_title");
+    assert.equal(unpacked[1].type, "TEXT");
+    assert.equal(unpacked[1].parentId, "hero_banner");
+    assert.equal(unpacked[1].characters, "Welcome to OpenDesigner");
+    assert.equal(unpacked[1].fontSize, 24);
+    assert.equal(unpacked[1].fontWeight, 700);
+
+    // 通过完整剪贴板入口解析二进制数据
+    const clipboardRes = parseFigmaClipboard(binary);
+    assert.equal(clipboardRes.success, true);
+    assert.equal(clipboardRes.rootId, "hero_banner");
+    assert.equal(clipboardRes.elements.length, 2);
+    assert.ok(clipboardRes.jsx.includes("Welcome to OpenDesigner"));
+  });
+
+  it("should convert Figma scene to production-ready React 19 / Tailwind v4 component code via figmaToReact19", () => {
+    const nodes: FigmaNode[] = [
+      {
+        id: "card_root",
+        name: "PricingCard",
+        type: "FRAME",
+        stackMode: "VERTICAL",
+        itemSpacing: 16,
+        paddingLeft: 24,
+        paddingRight: 24,
+        paddingTop: 24,
+        paddingBottom: 24,
+        cornerRadius: 16,
+        fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1, a: 1 } }],
+        strokes: [{ type: "SOLID", color: { r: 0.9, g: 0.9, b: 0.9, a: 1 } }],
+        strokeWeight: 1
+      },
+      {
+        id: "card_title",
+        name: "Title",
+        type: "TEXT",
+        parentId: "card_root",
+        characters: "Pro Plan",
+        fontSize: 20,
+        fontWeight: 700
+      },
+      {
+        id: "buy_btn",
+        name: "PurchaseButton",
+        type: "FRAME",
+        parentId: "card_root",
+        cornerRadius: 8,
+        fills: [{ type: "SOLID", color: { r: 0.1, g: 0.5, b: 0.9, a: 1 } }],
+        characters: "Get Started"
+      }
+    ];
+
+    const reactOutput = figmaToReact19(nodes, {
+      componentName: "PricingCard",
+      exportType: "named"
+    });
+
+    assert.equal(reactOutput.componentName, "PricingCard");
+    assert.equal(reactOutput.rootId, "card_root");
+    assert.equal(reactOutput.elements.length, 3);
+
+    // 验证生成的 React 19 JSX 语法结构
+    assert.ok(reactOutput.code.includes('import React from "react";'));
+    assert.ok(reactOutput.code.includes("export function PricingCard() {"));
+    assert.ok(reactOutput.code.includes("return ("));
+    assert.ok(reactOutput.code.includes("<section className="));
+    assert.ok(reactOutput.code.includes("flex-col"));
+    assert.ok(reactOutput.code.includes("rounded-xl"));
+    assert.ok(reactOutput.code.includes("border"));
+    assert.ok(reactOutput.code.includes("<p className="));
+    assert.ok(reactOutput.code.includes("Pro Plan"));
+    assert.ok(reactOutput.code.includes("<button className="));
+    assert.ok(reactOutput.code.includes("Get Started"));
+  });
+
+  it("should mount Figma import result directly into FlatStore via importFigmaToStore", () => {
+    const store: any = {
+      elements: new Map(),
+      childrenMap: new Map(),
+      setElement(el: any) {
+        this.elements.set(el.id, el);
+      },
+      attachChild(parentId: string, childId: string) {
+        const list = this.childrenMap.get(parentId) || [];
+        list.push(childId);
+        this.childrenMap.set(parentId, list);
+      }
+    };
+
+    const nodes: FigmaNode[] = [
+      { id: "parent_node", name: "Container", type: "FRAME" },
+      { id: "child_node", name: "Label", type: "TEXT", parentId: "parent_node", characters: "Hello" }
+    ];
+
+    const scene = buildSceneIndex(nodes);
+    const rootId = importFigmaToStore(store, scene);
+
+    assert.equal(rootId, "parent_node");
+    assert.equal(store.elements.size, 2);
+    assert.ok(store.elements.has("parent_node"));
+    assert.ok(store.elements.has("child_node"));
+    assert.deepEqual(store.childrenMap.get("parent_node"), ["child_node"]);
   });
 });

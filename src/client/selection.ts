@@ -124,7 +124,7 @@ export class SelectionManager {
   }
 
   /**
-   * 伴随拖拽移动更新缩放几何
+   * 伴随拖拽移动更新缩放几何 (精确保持固定边缘不动，仅移动把手边缘并吸附)
    */
   public updateResize(
     currentCursor: Point,
@@ -144,31 +144,165 @@ export class SelectionManager {
     const { handle, startBox, startPoint, elements } = this.activeSession;
     const dx = currentCursor.x - startPoint.x;
     const dy = currentCursor.y - startPoint.y;
+    const snapThreshold = options.snapThreshold ?? 5;
+    const candidates = options.candidates || [];
+    const enableSnapping = options.enableSnapping !== false && candidates.length > 0;
 
-    // 1. 根据手柄方向计算 deltaWidth 与 deltaHeight
-    let deltaWidth = 0;
-    let deltaHeight = 0;
+    const guides: SnapGuide[] = [];
+    let snappedX = false;
+    let snappedY = false;
 
-    if (handle.includes("e")) deltaWidth = dx;
-    else if (handle.includes("w")) deltaWidth = -dx;
+    // 1. 水平方向 (X 轴) 计算
+    let newLeft = startBox.left;
+    let newWidth = startBox.width;
 
-    if (handle.includes("s")) deltaHeight = dy;
-    else if (handle.includes("n")) deltaHeight = -dy;
+    if (handle.includes("e")) {
+      // 东侧手柄：左边缘固定，右边缘随鼠标移动
+      const rawRight = startBox.left + Math.max(1, startBox.width + dx);
+      let bestRight = rawRight;
+      let minDelta = Infinity;
+      let snapGuide: SnapGuide | null = null;
 
-    // 2. 调用伴随几何核心算法
-    let newBox = companionGeometry(startBox, handle, deltaWidth, deltaHeight);
-    let guides: SnapGuide[] = [];
-    let snapped = false;
+      if (enableSnapping) {
+        for (const cand of candidates) {
+          const candX = [cand.left, cand.left + cand.width / 2, cand.left + cand.width];
+          for (const cx of candX) {
+            const diff = Math.abs(cx - rawRight);
+            if (diff <= snapThreshold && diff < minDelta) {
+              minDelta = diff;
+              bestRight = cx;
+              snapGuide = {
+                orientation: "vertical",
+                coordinate: cx,
+                start: Math.min(startBox.top, cand.top),
+                end: Math.max(startBox.top + startBox.height, cand.top + cand.height)
+              };
+            }
+          }
+        }
+      }
 
-    // 3. 联动 6 线智能吸附
-    if (options.enableSnapping !== false && options.candidates && options.candidates.length > 0) {
-      const snapRes = compute6LineSnapping(newBox, options.candidates, options.snapThreshold ?? 5);
-      newBox = snapRes.snappedRect;
-      guides = snapRes.guides;
-      snapped = snapRes.snappedX || snapRes.snappedY;
+      newLeft = startBox.left;
+      newWidth = Math.max(1, bestRight - startBox.left);
+      if (snapGuide) {
+        guides.push(snapGuide);
+        snappedX = true;
+      }
+    } else if (handle.includes("w")) {
+      // 西侧手柄：右边缘固定，左边缘随鼠标移动
+      const fixedRight = startBox.left + startBox.width;
+      const rawLeft = startBox.left + dx;
+      let bestLeft = Math.min(fixedRight - 1, rawLeft);
+      let minDelta = Infinity;
+      let snapGuide: SnapGuide | null = null;
+
+      if (enableSnapping) {
+        for (const cand of candidates) {
+          const candX = [cand.left, cand.left + cand.width / 2, cand.left + cand.width];
+          for (const cx of candX) {
+            const diff = Math.abs(cx - rawLeft);
+            if (diff <= snapThreshold && diff < minDelta) {
+              minDelta = diff;
+              bestLeft = Math.min(fixedRight - 1, cx);
+              snapGuide = {
+                orientation: "vertical",
+                coordinate: cx,
+                start: Math.min(startBox.top, cand.top),
+                end: Math.max(startBox.top + startBox.height, cand.top + cand.height)
+              };
+            }
+          }
+        }
+      }
+
+      newLeft = bestLeft;
+      newWidth = Math.max(1, fixedRight - bestLeft);
+      if (snapGuide) {
+        guides.push(snapGuide);
+        snappedX = true;
+      }
     }
 
-    // 4. 计算子元素伴随等比缩放
+    // 2. 垂直方向 (Y 轴) 计算
+    let newTop = startBox.top;
+    let newHeight = startBox.height;
+
+    if (handle.includes("s")) {
+      // 南侧手柄：顶边缘固定，底边缘随鼠标移动
+      const rawBottom = startBox.top + Math.max(1, startBox.height + dy);
+      let bestBottom = rawBottom;
+      let minDelta = Infinity;
+      let snapGuide: SnapGuide | null = null;
+
+      if (enableSnapping) {
+        for (const cand of candidates) {
+          const candY = [cand.top, cand.top + cand.height / 2, cand.top + cand.height];
+          for (const cy of candY) {
+            const diff = Math.abs(cy - rawBottom);
+            if (diff <= snapThreshold && diff < minDelta) {
+              minDelta = diff;
+              bestBottom = cy;
+              snapGuide = {
+                orientation: "horizontal",
+                coordinate: cy,
+                start: Math.min(startBox.left, cand.left),
+                end: Math.max(startBox.left + startBox.width, cand.left + cand.width)
+              };
+            }
+          }
+        }
+      }
+
+      newTop = startBox.top;
+      newHeight = Math.max(1, bestBottom - startBox.top);
+      if (snapGuide) {
+        guides.push(snapGuide);
+        snappedY = true;
+      }
+    } else if (handle.includes("n")) {
+      // 北侧手柄：底边缘固定，顶边缘随鼠标移动
+      const fixedBottom = startBox.top + startBox.height;
+      const rawTop = startBox.top + dy;
+      let bestTop = Math.min(fixedBottom - 1, rawTop);
+      let minDelta = Infinity;
+      let snapGuide: SnapGuide | null = null;
+
+      if (enableSnapping) {
+        for (const cand of candidates) {
+          const candY = [cand.top, cand.top + cand.height / 2, cand.top + cand.height];
+          for (const cy of candY) {
+            const diff = Math.abs(cy - rawTop);
+            if (diff <= snapThreshold && diff < minDelta) {
+              minDelta = diff;
+              bestTop = Math.min(fixedBottom - 1, cy);
+              snapGuide = {
+                orientation: "horizontal",
+                coordinate: cy,
+                start: Math.min(startBox.left, cand.left),
+                end: Math.max(startBox.left + startBox.width, cand.left + cand.width)
+              };
+            }
+          }
+        }
+      }
+
+      newTop = bestTop;
+      newHeight = Math.max(1, fixedBottom - bestTop);
+      if (snapGuide) {
+        guides.push(snapGuide);
+        snappedY = true;
+      }
+    }
+
+    const newBox: Rect = {
+      left: newLeft,
+      top: newTop,
+      width: newWidth,
+      height: newHeight
+    };
+    const snapped = snappedX || snappedY;
+
+    // 3. 计算子元素伴随等比缩放
     let updatedElements: { id: string; rect: Rect }[];
     if (elements.length === 1) {
       updatedElements = [{ id: elements[0].id, rect: newBox }];
@@ -193,6 +327,73 @@ export class SelectionManager {
       guides,
       snapped
     };
+  }
+
+  /**
+   * 平移拖拽选区并触发 6 线智能吸附
+   */
+  public moveSelection(
+    deltaX: number,
+    deltaY: number,
+    options: {
+      candidates?: Rect[];
+      snapThreshold?: number;
+      enableSnapping?: boolean;
+    } = {}
+  ): {
+    newBox: Rect;
+    updatedElements: { id: string; rect: Rect }[];
+    guides: SnapGuide[];
+    snapped: boolean;
+  } | null {
+    const box = this.getBoundingBox();
+    if (!box) return null;
+
+    let targetBox: Rect = {
+      left: box.left + deltaX,
+      top: box.top + deltaY,
+      width: box.width,
+      height: box.height
+    };
+
+    let guides: SnapGuide[] = [];
+    let snapped = false;
+
+    if (options.enableSnapping !== false && options.candidates && options.candidates.length > 0) {
+      const snapRes = compute6LineSnapping(targetBox, options.candidates, options.snapThreshold ?? 5);
+      targetBox = snapRes.snappedRect;
+      guides = snapRes.guides;
+      snapped = snapRes.snappedX || snapRes.snappedY;
+    }
+
+    const actualDx = targetBox.left - box.left;
+    const actualDy = targetBox.top - box.top;
+
+    const updatedElements: { id: string; rect: Rect }[] = [];
+    for (const id of this.selectedIds) {
+      const r = this.elementRects.get(id);
+      if (r) {
+        const movedRect = {
+          left: r.left + actualDx,
+          top: r.top + actualDy,
+          width: r.width,
+          height: r.height
+        };
+        this.elementRects.set(id, movedRect);
+        updatedElements.push({ id, rect: movedRect });
+      }
+    }
+
+    return {
+      newBox: targetBox,
+      updatedElements,
+      guides,
+      snapped
+    };
+  }
+
+  public isSelected(id: string): boolean {
+    return this.selectedIds.has(id);
   }
 
   /**

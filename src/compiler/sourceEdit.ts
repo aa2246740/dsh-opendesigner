@@ -35,7 +35,7 @@ export function getTailwindCategory(token: string): string {
   const baseToken = colonIdx !== -1 ? token.slice(colonIdx + 1) : token;
 
   // 1. 文本相关：细分颜色、字号、对齐、粗细、排版、换行、溢出、透明度
-  if (/^text-(xs|sm|base|lg|xl|[2-9]xl)$/.test(baseToken)) {
+  if (/^text-(xs|sm|base|lg|xl|[2-9]xl|\[\d+[^\]]*\])$/.test(baseToken)) {
     return `${prefix}text-size`;
   }
   if (/^text-(left|center|right|justify|start|end)$/.test(baseToken)) {
@@ -106,11 +106,11 @@ export function getTailwindCategory(token: string): string {
   if (/^border-opacity-/.test(baseToken)) {
     return `${prefix}border-opacity`;
   }
-  if (/^border-(t|b|l|r)(-\d+)?$/.test(baseToken)) {
+  if (/^border-(t|b|l|r)(-\d+|-\[\d+[^\]]*\])?$/.test(baseToken)) {
     const side = baseToken.match(/^border-(t|b|l|r)/)![1];
     return `${prefix}border-width-${side}`;
   }
-  if (/^border(-\d+)?$/.test(baseToken)) {
+  if (/^border(-\d+|-\[\d+[^\]]*\])?$/.test(baseToken)) {
     return `${prefix}border-width`;
   }
   if (/^border-/.test(baseToken)) {

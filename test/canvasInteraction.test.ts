@@ -123,11 +123,34 @@ describe("Client - Selection & 8-Direction Handles Engine", () => {
 
     assert.ok(res);
     assert.equal(res.snapped, true);
+    assert.equal(res.newBox.left, 50); // Left edge remains strictly fixed
+    assert.equal(res.newBox.width, 130); // Width expands to reach 180
     assert.equal(res.newBox.left + res.newBox.width, 180);
     assert.equal(res.guides.length, 1);
     assert.equal(res.guides[0].coordinate, 180);
 
     selection.endResize();
+  });
+
+  it("should support selection move with 6-line snapping without altering element dimensions", () => {
+    const selection = new SelectionManager();
+    selection.setElements([
+      { id: "box_1", rect: { left: 40, top: 40, width: 80, height: 60 } }
+    ]);
+    selection.select(["box_1"]);
+
+    // Move by dx=58, dy=0 -> target left = 98. Candidate left = 100 (within threshold 5)
+    const moveRes = selection.moveSelection(58, 0, {
+      candidates: [{ left: 100, top: 0, width: 50, height: 50 }],
+      snapThreshold: 5,
+      enableSnapping: true
+    });
+
+    assert.ok(moveRes);
+    assert.equal(moveRes.snapped, true);
+    assert.equal(moveRes.newBox.left, 100);
+    assert.equal(moveRes.newBox.width, 80); // Width unchanged
+    assert.equal(moveRes.newBox.height, 60); // Height unchanged
   });
 });
 
@@ -229,15 +252,18 @@ describe("Client - ComponentSandbox & Next.js Runtime Shims", () => {
     const sandbox = new ComponentSandbox();
     const html = sandbox.renderToHtml(store, "root_box");
 
-    assert.ok(html.includes('<div class="p-4 bg-gray-50">'));
+    assert.ok(html.includes('class="p-4 bg-gray-50"'));
+    assert.ok(html.includes('data-element-id="root_box"'));
     // Image shim replaces Image with img and data-next-image
     assert.ok(html.includes('<img'));
     assert.ok(html.includes('src="/avatar.png"'));
     assert.ok(html.includes('data-next-image="true"'));
+    assert.ok(html.includes('data-element-id="img_node"'));
     // Link shim replaces Link with a and data-next-link
     assert.ok(html.includes('<a'));
     assert.ok(html.includes('href="/dashboard"'));
     assert.ok(html.includes('data-next-link="true"'));
+    assert.ok(html.includes('data-element-id="link_node"'));
     assert.ok(html.includes("Go to Dashboard"));
   });
 });

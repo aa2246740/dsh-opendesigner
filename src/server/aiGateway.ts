@@ -38,14 +38,20 @@ export interface GenerateEditsResult {
   model?: string;
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   rawOutput?: string;
+  reasoning?: string;
   error?: string;
   attempts?: number;
 }
 
+export const DEEPSEEK_MODELS = {
+  V3: "deepseek-chat",
+  R1: "deepseek-reasoner"
+} as const;
+
 export const PROVIDER_DEFAULTS: Record<AIProvider, { baseURL: string; defaultModel: string }> = {
   deepseek: {
     baseURL: "https://api.deepseek.com/v1",
-    defaultModel: "deepseek-chat" // DeepSeek-V3
+    defaultModel: DEEPSEEK_MODELS.V3 // DeepSeek-V3
   },
   openai: {
     baseURL: "https://api.openai.com/v1",
@@ -96,7 +102,9 @@ export class AIGateway {
       "2. `new_string` must keep the code syntactically valid TypeScript/JSX.",
       "3. Use Tailwind v4 utility classes wherever styling changes are requested.",
       "4. Do NOT rewrite the whole file; only return surgical edits.",
-      "5. You MUST output strictly structured JSON matching the `save_to_code_edits` schema."
+      "5. You MUST output strictly structured JSON matching the schema:",
+      JSON.stringify(SAVE_TO_CODE_JSON_SCHEMA.parameters, null, 2),
+      'Example JSON output: {"edits": [{"old_string": "exact old code", "new_string": "new code", "replace_all": false}]}'
     ].join("\n");
   }
 
@@ -150,6 +158,7 @@ export class AIGateway {
           model: this.model,
           usage: editsRes.usage,
           rawOutput: editsRes.rawOutput,
+          reasoning: editsRes.reasoning,
           attempts
         };
       } catch (err: any) {
@@ -202,22 +211,27 @@ export class AIGateway {
       headers["Authorization"] = `Bearer ${this.apiKey}`;
     }
 
+    const isReasoningModel = this.model.includes("reasoner") || this.model.includes("r1");
+
     const requestBody: any = {
       model: this.model,
       messages,
-      temperature: this.temperature,
-      max_tokens: this.maxTokens,
-      tools: [
+      max_tokens: this.maxTokens
+    };
+
+    if (!isReasoningModel) {
+      requestBody.temperature = this.temperature;
+      requestBody.tools = [
         {
           type: "function",
           function: SAVE_TO_CODE_JSON_SCHEMA
         }
-      ],
-      tool_choice: {
+      ];
+      requestBody.tool_choice = {
         type: "function",
         function: { name: "save_to_code_edits" }
-      }
-    };
+      };
+    }
 
     const response = await this.fetchFn(endpoint, {
       method: "POST",
@@ -239,18 +253,32 @@ export class AIGateway {
       return { success: false, error: "Empty choices in model response" };
     }
 
+    let reasoning = choice.message?.reasoning_content;
+    let content = choice.message?.content || "";
+
+    // 支持 <think> 标签中的思考链提取 (用于兼容部分通过 content 返回思考流的模型/代理)
+    const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
+    if (thinkMatch) {
+      if (!reasoning) {
+        reasoning = thinkMatch[1].trim();
+      }
+      content = content.replace(/<think>[\s\S]*?<\/think>/, "").trim();
+    }
+
     // 1. 尝试从 Tool Call 中提取结构化参数
     const toolCalls = choice.message?.tool_calls;
     if (toolCalls && toolCalls.length > 0) {
       const call = toolCalls[0];
       try {
-        const parsed = JSON.parse(call.function.arguments);
+        const rawArgs = call.function.arguments;
+        const parsed = typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs;
         if (Array.isArray(parsed.edits)) {
           return {
             success: true,
             edits: parsed.edits,
             usage: json.usage,
-            rawOutput: call.function.arguments
+            rawOutput: typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs),
+            reasoning
           };
         }
       } catch (err: any) {
@@ -258,23 +286,31 @@ export class AIGateway {
       }
     }
 
-    // 2. 尝试从正文解析 JSON
-    const content = choice.message?.content || "";
-    try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+    // 2. 尝试从正文解析 JSON (优先提取 ```json ... ``` 代码块)
+    let jsonContent = "";
+    const codeBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (codeBlockMatch) {
+      jsonContent = codeBlockMatch[1].trim();
+    } else {
+      const match = content.match(/\{[\s\S]*\}/);
+      if (match) jsonContent = match[0].trim();
+    }
+
+    if (jsonContent) {
+      try {
+        const parsed = JSON.parse(jsonContent);
         if (Array.isArray(parsed.edits)) {
           return {
             success: true,
             edits: parsed.edits,
             usage: json.usage,
-            rawOutput: content
+            rawOutput: content,
+            reasoning
           };
         }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
 
     return {
@@ -294,9 +330,35 @@ export class AIGateway {
     edits?: CodePatchEdit[];
     usage?: any;
     rawOutput?: string;
+    reasoning?: string;
     error?: string;
   } {
     const { sourceCode, instruction } = req;
+
+    // 模拟持续语法错误（用于测试重试上限与安全回滚防线）
+    if (instruction.includes("FAIL_SYNTAX_PERMANENT")) {
+      return {
+        success: true,
+        edits: [
+          {
+            old_string: "<button",
+            new_string: "<button unclosed_bracket {"
+          }
+        ]
+      };
+    }
+
+    // 模拟 DeepSeek-R1 推理链输出
+    if (instruction.includes("DEEPSEEK_R1_MOCK")) {
+      const match = sourceCode.match(/className="([^"]*)"/);
+      const oldClass = match ? match[0] : "";
+      const newClass = match ? `className="${match[1]} shadow-lg"` : "";
+      return {
+        success: true,
+        edits: oldClass ? [{ old_string: oldClass, new_string: newClass }] : [],
+        reasoning: "DeepSeek-R1 reasoning: User requested shadow styling. Identified target element className attribute and appended shadow-lg."
+      };
+    }
 
     // 模拟语法错误重试场景
     if (instruction.includes("FAIL_THEN_FIX") && !feedbackError) {

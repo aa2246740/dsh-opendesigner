@@ -15,6 +15,7 @@ export interface MCPToolDefinition {
   description: string;
   category: "project" | "local" | "canvas" | "design" | "skills";
   destructive?: boolean;
+  parameters?: Record<string, any>;
 }
 
 export interface MCPContext {
@@ -27,52 +28,439 @@ export interface MCPContext {
 
 export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   // 类别 1: Project Tools (10)
-  { name: "project_list", description: "列出当前打开的工程列表", category: "project" },
-  { name: "project_pick", description: "绑定当前 MCP 会话到指定工程", category: "project" },
-  { name: "project_read", description: "读取工程源码文件，支持行号与切片", category: "project" },
-  { name: "project_glob", description: "根据 Glob 模式匹配工程内文件", category: "project" },
-  { name: "project_grep", description: "在工程源码中执行正则搜索", category: "project" },
-  { name: "project_write", description: "创建或覆盖工程文件", category: "project", destructive: true },
-  { name: "project_write_batch", description: "批量创建工程代码文件", category: "project", destructive: true },
-  { name: "project_edit", description: "针对工程代码文件进行字符串替换", category: "project", destructive: true },
-  { name: "project_delete", description: "删除工程文件", category: "project", destructive: true },
-  { name: "project_copy_asset", description: "复制二进制静态图片资源", category: "project", destructive: true },
+  {
+    name: "project_list",
+    description: "列出当前打开的工程列表",
+    category: "project",
+    parameters: { type: "object", properties: {} }
+  },
+  {
+    name: "project_pick",
+    description: "绑定当前 MCP 会话到指定工程",
+    category: "project",
+    parameters: {
+      type: "object",
+      properties: { projectId: { type: "string", description: "工程ID" } },
+      required: ["projectId"]
+    }
+  },
+  {
+    name: "project_read",
+    description: "读取工程源码文件，支持行号与切片",
+    category: "project",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径" },
+        offset: { type: "number", description: "起始行偏移" },
+        limit: { type: "number", description: "读取行数上限" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "project_glob",
+    description: "根据 Glob 模式匹配工程内文件",
+    category: "project",
+    parameters: {
+      type: "object",
+      properties: { pattern: { type: "string", description: "Glob 模式" } },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "project_grep",
+    description: "在工程源码中执行正则搜索",
+    category: "project",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "搜索正则" },
+        pathPrefix: { type: "string", description: "路径前缀过滤" }
+      },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "project_write",
+    description: "创建或覆盖工程文件",
+    category: "project",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径" },
+        content: { type: "string", description: "文件内容" }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "project_write_batch",
+    description: "批量创建工程代码文件",
+    category: "project",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: {
+        files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { path: { type: "string" }, content: { type: "string" } },
+            required: ["path", "content"]
+          },
+          description: "文件列表"
+        }
+      },
+      required: ["files"]
+    }
+  },
+  {
+    name: "project_edit",
+    description: "针对工程代码文件进行字符串替换",
+    category: "project",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径" },
+        old_string: { type: "string", description: "被替换字符串" },
+        new_string: { type: "string", description: "替换目标字符串" },
+        replace_all: { type: "boolean", description: "是否全局替换" }
+      },
+      required: ["path", "old_string", "new_string"]
+    }
+  },
+  {
+    name: "project_delete",
+    description: "删除工程文件",
+    category: "project",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "文件路径" } },
+      required: ["path"]
+    }
+  },
+  {
+    name: "project_copy_asset",
+    description: "复制二进制静态图片资源",
+    category: "project",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: {
+        sourcePath: { type: "string", description: "源资源路径" },
+        targetPath: { type: "string", description: "目标路径" }
+      },
+      required: ["sourcePath", "targetPath"]
+    }
+  },
 
   // 类别 2: Local Filesystem Tools (7)
-  { name: "local_read", description: "读取宿主本地磁盘文件", category: "local" },
-  { name: "local_read_batch", description: "批量读取宿主本地文件", category: "local" },
-  { name: "local_write", description: "写入宿主本地代码文件", category: "local", destructive: true },
-  { name: "local_edit", description: "修改宿主本地文件内容", category: "local", destructive: true },
-  { name: "local_glob", description: "在宿主本地匹配文件路径", category: "local" },
-  { name: "local_grep", description: "在宿主本地搜索正则内容", category: "local" },
-  { name: "scan_project", description: "扫描本地 React 仓库并提取组件元信息", category: "local" },
+  {
+    name: "local_read",
+    description: "读取宿主本地磁盘文件",
+    category: "local",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "本地路径" } },
+      required: ["path"]
+    }
+  },
+  {
+    name: "local_read_batch",
+    description: "批量读取宿主本地文件",
+    category: "local",
+    parameters: {
+      type: "object",
+      properties: { paths: { type: "array", items: { type: "string" }, description: "路径列表" } },
+      required: ["paths"]
+    }
+  },
+  {
+    name: "local_write",
+    description: "写入宿主本地代码文件",
+    category: "local",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "本地路径" },
+        content: { type: "string", description: "写入内容" }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "local_edit",
+    description: "修改宿主本地文件内容",
+    category: "local",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "本地路径" },
+        old_string: { type: "string" },
+        new_string: { type: "string" }
+      },
+      required: ["path", "old_string", "new_string"]
+    }
+  },
+  {
+    name: "local_glob",
+    description: "在宿主本地匹配文件路径",
+    category: "local",
+    parameters: {
+      type: "object",
+      properties: { pattern: { type: "string", description: "Glob模式" } },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "local_grep",
+    description: "在宿主本地搜索正则内容",
+    category: "local",
+    parameters: {
+      type: "object",
+      properties: { pattern: { type: "string", description: "搜索正则" } },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "scan_project",
+    description: "扫描本地 React 仓库并提取组件元信息",
+    category: "local",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "工程路径" } }
+    }
+  },
 
   // 类别 3: Canvas Direct Tools (13)
-  { name: "canvas_list", description: "列出工程中所有的画布页面", category: "canvas" },
-  { name: "canvas_create_page", description: "创建空白画布页面", category: "canvas" },
-  { name: "canvas_read", description: "以结构化 JSX 形式读取画布节点并计算 covering_hash", category: "canvas" },
-  { name: "canvas_claim", description: "并发排他锁：锁定目标元素，下发 claim_id (TTL 300s)", category: "canvas" },
-  { name: "canvas_release", description: "释放排他锁，校验视觉验收是否达成", category: "canvas" },
-  { name: "canvas_add", description: "向当前画布插入新 JSX 元素", category: "canvas" },
-  { name: "canvas_update", description: "整体替换被锁定的元素 JSX", category: "canvas" },
-  { name: "canvas_edit", description: "对画布元素 JSX 进行精细字符串替换", category: "canvas" },
-  { name: "canvas_insert", description: "插入兄弟节点或子节点", category: "canvas" },
-  { name: "canvas_delete", description: "删除指定的画布元素", category: "canvas" },
-  { name: "canvas_grep", description: "在画布 JSX 内容中正则搜索", category: "canvas" },
-  { name: "canvas_query", description: "使用 CSS 选择器语法查询画布节点", category: "canvas" },
-  { name: "canvas_create_import_scaffold", description: "生成设计系统导入参考页脚手架", category: "canvas" },
+  {
+    name: "canvas_list",
+    description: "列出工程中所有的画布页面",
+    category: "canvas",
+    parameters: { type: "object", properties: {} }
+  },
+  {
+    name: "canvas_create_page",
+    description: "创建空白画布页面",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: { name: { type: "string", description: "页面名称" } },
+      required: ["name"]
+    }
+  },
+  {
+    name: "canvas_read",
+    description: "以结构化 JSX 形式读取画布节点并计算 covering_hash",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: {
+        elementId: { type: "string", description: "目标元素ID" },
+        pageId: { type: "string", description: "页面ID" }
+      }
+    }
+  },
+  {
+    name: "canvas_claim",
+    description: "并发排他锁：锁定目标元素，下发 claim_id (TTL 300s)",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: {
+        elementId: { type: "string", description: "目标元素ID" },
+        covering_hash: { type: "string", description: "校验覆盖哈希" }
+      },
+      required: ["elementId", "covering_hash"]
+    }
+  },
+  {
+    name: "canvas_release",
+    description: "释放排他锁，校验视觉验收是否达成",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: { claim_id: { type: "string", description: "排他锁ID" } },
+      required: ["claim_id"]
+    }
+  },
+  {
+    name: "canvas_add",
+    description: "向当前画布插入新 JSX 元素",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: {
+        tag: { type: "string", description: "元素标签" },
+        props: { type: "object", description: "属性键值对" },
+        textContent: { type: "string", description: "文本内容" },
+        parentId: { type: "string", description: "挂载父节点ID" }
+      }
+    }
+  },
+  {
+    name: "canvas_update",
+    description: "整体替换被锁定的元素 JSX",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: {
+        claim_id: { type: "string", description: "排他锁ID" },
+        elementId: { type: "string", description: "目标元素ID" },
+        props: { type: "object", description: "新属性" },
+        textContent: { type: "string", description: "新文本内容" }
+      },
+      required: ["claim_id", "elementId"]
+    }
+  },
+  {
+    name: "canvas_edit",
+    description: "对画布元素 JSX 进行精细字符串替换",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: {
+        claim_id: { type: "string", description: "排他锁ID" },
+        elementId: { type: "string", description: "目标元素ID" },
+        old_string: { type: "string", description: "原字符串" },
+        new_string: { type: "string", description: "替换字符串" }
+      },
+      required: ["claim_id", "elementId", "old_string", "new_string"]
+    }
+  },
+  {
+    name: "canvas_insert",
+    description: "插入兄弟节点或子节点",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: {
+        claim_id: { type: "string", description: "排他锁ID" },
+        targetId: { type: "string", description: "参考目标ID" },
+        position: { type: "string", enum: ["before", "after", "append"], description: "插入位置" },
+        tag: { type: "string", description: "JSX标签" },
+        props: { type: "object", description: "属性" },
+        textContent: { type: "string" }
+      },
+      required: ["claim_id", "targetId", "position"]
+    }
+  },
+  {
+    name: "canvas_delete",
+    description: "删除指定的画布元素",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: {
+        claim_id: { type: "string", description: "排他锁ID" },
+        elementId: { type: "string", description: "待删除元素ID" }
+      },
+      required: ["claim_id", "elementId"]
+    }
+  },
+  {
+    name: "canvas_grep",
+    description: "在画布 JSX 内容中正则搜索",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: { pattern: { type: "string", description: "检索正则" } },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "canvas_query",
+    description: "使用 CSS 选择器语法查询画布节点",
+    category: "canvas",
+    parameters: {
+      type: "object",
+      properties: { selector: { type: "string", description: "选择器表达式" } },
+      required: ["selector"]
+    }
+  },
+  {
+    name: "canvas_create_import_scaffold",
+    description: "生成设计系统导入参考页脚手架",
+    category: "canvas",
+    parameters: { type: "object", properties: {} }
+  },
 
   // 类别 4: Design & Theme Tools (6)
-  { name: "get_theme", description: "提取 Tailwind 变量与设计系统 Token", category: "design" },
-  { name: "get_design_context", description: "一键打包获取主题、组件目录与画布摘要", category: "design" },
-  { name: "search_components", description: "按名称与 Props 搜索工程组件", category: "design" },
-  { name: "search_icons", description: "检索项目可用图标名称", category: "design" },
-  { name: "set_icon_library", description: "配置项目图标库", category: "design", destructive: true },
-  { name: "take_screenshot", description: "对目标画布元素离屏截图并返回 base64 PNG", category: "design" },
+  {
+    name: "get_theme",
+    description: "提取 Tailwind 变量与设计系统 Token",
+    category: "design",
+    parameters: { type: "object", properties: {} }
+  },
+  {
+    name: "get_design_context",
+    description: "一键打包获取主题、组件目录与画布摘要",
+    category: "design",
+    parameters: { type: "object", properties: {} }
+  },
+  {
+    name: "search_components",
+    description: "按名称与 Props 搜索工程组件",
+    category: "design",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string", description: "搜索词" } }
+    }
+  },
+  {
+    name: "search_icons",
+    description: "检索项目可用图标名称",
+    category: "design",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string", description: "图标名" } }
+    }
+  },
+  {
+    name: "set_icon_library",
+    description: "配置项目图标库",
+    category: "design",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: { library: { type: "string", description: "图标库名称" } },
+      required: ["library"]
+    }
+  },
+  {
+    name: "take_screenshot",
+    description: "对目标画布元素离屏截图并返回 base64 PNG",
+    category: "design",
+    parameters: {
+      type: "object",
+      properties: { elementId: { type: "string", description: "待截图元素ID" } },
+      required: ["elementId"]
+    }
+  },
 
   // 类别 5: Skills Tools (2)
-  { name: "list_skills", description: "列出当前可用的工作流设计技能", category: "skills" },
-  { name: "read_skill", description: "读取设计规范技能规约正文", category: "skills" }
+  {
+    name: "list_skills",
+    description: "列出当前可用的工作流设计技能",
+    category: "skills",
+    parameters: { type: "object", properties: {} }
+  },
+  {
+    name: "read_skill",
+    description: "读取设计规范技能规约正文",
+    category: "skills",
+    parameters: {
+      type: "object",
+      properties: { name: { type: "string", description: "技能名称" } },
+      required: ["name"]
+    }
+  }
 ];
 
 /**

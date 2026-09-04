@@ -175,40 +175,127 @@ export class KiwiReader {
 }
 
 /**
+ * 纯 TypeScript Kiwi 二进制流编码器
+ */
+export class KiwiWriter {
+  private buffer: Uint8Array;
+  private offset: number = 0;
+
+  constructor(initialCapacity: number = 1024) {
+    this.buffer = new Uint8Array(initialCapacity);
+  }
+
+  private ensureCapacity(needed: number): void {
+    if (this.offset + needed <= this.buffer.length) return;
+    let nextCapacity = Math.max(this.buffer.length * 2, this.offset + needed);
+    const nextBuffer = new Uint8Array(nextCapacity);
+    nextBuffer.set(this.buffer);
+    this.buffer = nextBuffer;
+  }
+
+  public getOffset(): number {
+    return this.offset;
+  }
+
+  public writeByte(b: number): void {
+    this.ensureCapacity(1);
+    this.buffer[this.offset++] = b & 0xff;
+  }
+
+  public writeBytes(bytes: Uint8Array): void {
+    this.ensureCapacity(bytes.length);
+    this.buffer.set(bytes, this.offset);
+    this.offset += bytes.length;
+  }
+
+  /**
+   * 写入无符号 Varint
+   */
+  public writeVarUint(value: number): void {
+    let val = value >>> 0;
+    while (val >= 0x80) {
+      this.writeByte((val & 0x7f) | 0x80);
+      val >>>= 7;
+    }
+    this.writeByte(val & 0x7f);
+  }
+
+  /**
+   * 写入带符号 Varint (ZigZag 编码)
+   */
+  public writeVarInt(value: number): void {
+    const zigzag = (value << 1) ^ (value >> 31);
+    this.writeVarUint(zigzag);
+  }
+
+  /**
+   * 写入 32 位浮点数
+   */
+  public writeFloat32(val: number): void {
+    this.ensureCapacity(4);
+    const view = new DataView(this.buffer.buffer, this.buffer.byteOffset + this.offset, 4);
+    view.setFloat32(0, val, true);
+    this.offset += 4;
+  }
+
+  /**
+   * 写入长度前缀的 UTF-8 字符串
+   */
+  public writeString(str: string): void {
+    const encoded = new TextEncoder().encode(str);
+    this.writeVarUint(encoded.length);
+    this.writeBytes(encoded);
+  }
+
+  /**
+   * 写入 Figma Kiwi 头部 Magic 标识
+   */
+  public writeHeader(magic: "figma" | "kiwi" = "figma"): void {
+    const magicBytes = new TextEncoder().encode(magic);
+    this.writeBytes(magicBytes);
+  }
+
+  public toUint8Array(): Uint8Array {
+    return this.buffer.subarray(0, this.offset);
+  }
+}
+
+/**
  * 调色板映射：将 Figma RGB 浮点色彩 (0-1) 映射为最贴合的 Tailwind 语义类名或 hex
  */
 export function figmaColorToTailwind(color: FigmaColor, prefix: "bg" | "text" | "border" = "bg"): string {
   const r = Math.round(color.r * 255);
   const g = Math.round(color.g * 255);
   const b = Math.round(color.b * 255);
-  const a = color.a ?? 1;
+  const a = color.a !== undefined ? color.a : 1;
+  const opacitySuffix = a < 0.99 && a > 0 ? `/${Math.round(a * 100)}` : "";
 
   // 基础常用预设映射
-  if (r === 255 && g === 255 && b === 255) return `${prefix}-white`;
-  if (r === 0 && g === 0 && b === 0) return `${prefix}-black`;
+  if (r === 255 && g === 255 && b === 255) return `${prefix}-white${opacitySuffix}`;
+  if (r === 0 && g === 0 && b === 0) return `${prefix}-black${opacitySuffix}`;
   if (a === 0) return `${prefix}-transparent`;
 
   // 近似 Tailwind 调色盘
-  if (r > 200 && g < 100 && b < 100) return `${prefix}-red-500`;
-  if (r < 100 && g > 180 && b < 100) return `${prefix}-green-500`;
-  if (r < 100 && g < 150 && b > 220) return `${prefix}-blue-500`;
-  if (r > 200 && g > 150 && b < 50) return `${prefix}-amber-500`;
-  if (r > 100 && g < 100 && b > 200) return `${prefix}-indigo-500`;
-  if (r > 200 && g < 100 && b > 200) return `${prefix}-pink-500`;
+  if (r > 200 && g < 100 && b < 100) return `${prefix}-red-500${opacitySuffix}`;
+  if (r < 100 && g > 180 && b < 100) return `${prefix}-green-500${opacitySuffix}`;
+  if (r < 100 && g < 150 && b > 220) return `${prefix}-blue-500${opacitySuffix}`;
+  if (r > 200 && g > 150 && b < 50) return `${prefix}-amber-500${opacitySuffix}`;
+  if (r > 100 && g < 100 && b > 200) return `${prefix}-indigo-500${opacitySuffix}`;
+  if (r > 200 && g < 100 && b > 200) return `${prefix}-pink-500${opacitySuffix}`;
 
   // 灰阶检测
   if (Math.abs(r - g) < 10 && Math.abs(g - b) < 10) {
-    if (r > 230) return `${prefix}-gray-100`;
-    if (r > 200) return `${prefix}-gray-200`;
-    if (r > 150) return `${prefix}-gray-400`;
-    if (r > 100) return `${prefix}-gray-600`;
-    if (r > 40) return `${prefix}-gray-800`;
-    return `${prefix}-gray-900`;
+    if (r > 230) return `${prefix}-gray-100${opacitySuffix}`;
+    if (r > 200) return `${prefix}-gray-200${opacitySuffix}`;
+    if (r > 150) return `${prefix}-gray-400${opacitySuffix}`;
+    if (r > 100) return `${prefix}-gray-600${opacitySuffix}`;
+    if (r > 40) return `${prefix}-gray-800${opacitySuffix}`;
+    return `${prefix}-gray-900${opacitySuffix}`;
   }
 
   // 兜底为十六进制 Arbitrary Value
   const hex = [r, g, b].map((x) => x.toString(16).padStart(2, "0")).join("");
-  return `${prefix}-[#${hex}]`;
+  return `${prefix}-[#${hex}]${opacitySuffix}`;
 }
 
 /**
@@ -247,10 +334,13 @@ export function figmaNodeToTailwindClasses(node: FigmaNode): string[] {
     if (node.counterAxisAlignItems === "CENTER") classes.push("items-center");
     else if (node.counterAxisAlignItems === "MAX") classes.push("items-end");
     else if (node.counterAxisAlignItems === "MIN") classes.push("items-start");
+    else if (node.counterAxisAlignItems === "BASELINE") classes.push("items-baseline");
+    else if (node.counterAxisAlignItems === "STRETCH") classes.push("items-stretch");
 
     if (node.primaryAxisAlignItems === "CENTER") classes.push("justify-center");
     else if (node.primaryAxisAlignItems === "SPACE_BETWEEN") classes.push("justify-between");
     else if (node.primaryAxisAlignItems === "MAX") classes.push("justify-end");
+    else if (node.primaryAxisAlignItems === "MIN") classes.push("justify-start");
 
     if (node.itemSpacing) {
       const gap = pixelToTailwindScale(node.itemSpacing);
@@ -261,9 +351,13 @@ export function figmaNodeToTailwindClasses(node: FigmaNode): string[] {
     if (node.counterAxisAlignItems === "CENTER") classes.push("items-center");
     else if (node.counterAxisAlignItems === "MAX") classes.push("items-end");
     else if (node.counterAxisAlignItems === "MIN") classes.push("items-start");
+    else if (node.counterAxisAlignItems === "BASELINE") classes.push("items-baseline");
+    else if (node.counterAxisAlignItems === "STRETCH") classes.push("items-stretch");
 
     if (node.primaryAxisAlignItems === "CENTER") classes.push("justify-center");
     else if (node.primaryAxisAlignItems === "SPACE_BETWEEN") classes.push("justify-between");
+    else if (node.primaryAxisAlignItems === "MAX") classes.push("justify-end");
+    else if (node.primaryAxisAlignItems === "MIN") classes.push("justify-start");
 
     if (node.itemSpacing) {
       const gap = pixelToTailwindScale(node.itemSpacing);
@@ -294,17 +388,36 @@ export function figmaNodeToTailwindClasses(node: FigmaNode): string[] {
     }
   }
 
-  // 3. Fills (背景色)
+  // 3. Fills (背景色与渐变)
   if (node.fills && node.fills.length > 0) {
     const solid = node.fills.find((f) => f.type === "SOLID" && f.visible !== false && f.color);
     if (solid?.color) {
       classes.push(figmaColorToTailwind(solid.color, "bg"));
     }
+
+    // 支持线性渐变填充
+    const gradient = node.fills.find((f) => f.type === "GRADIENT_LINEAR" && f.visible !== false);
+    if (gradient) {
+      classes.push("bg-gradient-to-r");
+      const stops = (gradient as any).gradientStops;
+      if (Array.isArray(stops) && stops.length >= 2) {
+        classes.push(
+          figmaColorToTailwind(stops[0].color, "from"),
+          figmaColorToTailwind(stops[stops.length - 1].color, "to")
+        );
+      } else {
+        classes.push("from-slate-900", "to-slate-800");
+      }
+    }
   }
 
   // 4. Strokes (边框)
   if (node.strokes && node.strokes.length > 0 && node.strokeWeight) {
-    classes.push(node.strokeWeight === 1 ? "border" : `border-${node.strokeWeight}`);
+    const sw = node.strokeWeight;
+    if (sw === 1) classes.push("border");
+    else if (sw === 2 || sw === 4 || sw === 8) classes.push(`border-${sw}`);
+    else classes.push(`border-[${sw}px]`);
+
     const strokePaint = node.strokes.find((s) => s.type === "SOLID" && s.color);
     if (strokePaint?.color) {
       classes.push(figmaColorToTailwind(strokePaint.color, "border"));
@@ -336,7 +449,13 @@ export function figmaNodeToTailwindClasses(node: FigmaNode): string[] {
     }
   }
 
-  // 7. Typography (文字样式)
+  // 7. Opacity (图层透明度)
+  if (node.opacity !== undefined && node.opacity < 1 && node.opacity >= 0) {
+    const op = Math.round(node.opacity * 100);
+    classes.push(`opacity-${op}`);
+  }
+
+  // 8. Typography (文字样式)
   if (node.type === "TEXT") {
     if (node.fontSize) {
       const sz = node.fontSize;
@@ -393,7 +512,7 @@ export function buildSceneIndex(nodes: FigmaNode[]): SceneIndex {
   for (const n of nodes) {
     if (n.parentId && nodeMap.has(n.parentId)) {
       const list = childrenMap.get(n.parentId) || [];
-      list.push(n.id);
+      if (!list.includes(n.id)) list.push(n.id);
       childrenMap.set(n.parentId, list);
       allChildIds.add(n.id);
     }
@@ -411,18 +530,89 @@ export function buildSceneIndex(nodes: FigmaNode[]): SceneIndex {
     }
   }
 
-  // 根节点定义为所有不在 allChildIds 中的节点
-  const rootIds = nodes.filter((n) => !allChildIds.has(n.id)).map((n) => n.id);
+  // 根节点定义为所有不在 allChildIds 中的唯一节点
+  const rootIds = Array.from(new Set(nodes.filter((n) => !allChildIds.has(n.id)).map((n) => n.id)));
 
   return { nodeMap, childrenMap, rootIds };
 }
 
 /**
+ * Kiwi 二进制封包器：将 FigmaNode 列表打包为紧凑二进制字节流
+ */
+export function packKiwiBinary(nodes: FigmaNode[], magic: "figma" | "kiwi" = "figma"): Uint8Array {
+  const writer = new KiwiWriter();
+  writer.writeHeader(magic);
+
+  const typeMapInverse: Record<string, number> = {
+    FRAME: 1,
+    GROUP: 2,
+    TEXT: 3,
+    RECTANGLE: 4,
+    VECTOR: 5,
+    COMPONENT: 6,
+    INSTANCE: 7
+  };
+
+  for (const node of nodes) {
+    writer.writeByte(1); // 节点起始标记
+    writer.writeString(node.id || "");
+    writer.writeString(node.name || "");
+    writer.writeByte(typeMapInverse[node.type] || 1);
+
+    // AutoLayout 标志与间距
+    let autoMode = 0;
+    if (node.stackMode === "HORIZONTAL") autoMode = 1;
+    else if (node.stackMode === "VERTICAL") autoMode = 2;
+    writer.writeByte(autoMode);
+
+    if (autoMode > 0) {
+      writer.writeVarUint(node.itemSpacing || 0);
+      writer.writeVarUint(node.paddingLeft || 0);
+      writer.writeVarUint(node.paddingRight || 0);
+      writer.writeVarUint(node.paddingTop || 0);
+      writer.writeVarUint(node.paddingBottom || 0);
+    }
+
+    // 色彩 Fill
+    const solidFill = node.fills?.find((f) => f.type === "SOLID" && f.color);
+    if (solidFill?.color) {
+      writer.writeByte(1);
+      writer.writeFloat32(solidFill.color.r);
+      writer.writeFloat32(solidFill.color.g);
+      writer.writeFloat32(solidFill.color.b);
+      writer.writeFloat32(solidFill.color.a ?? 1);
+    } else {
+      writer.writeByte(0);
+    }
+
+    // 圆角
+    writer.writeVarUint(node.cornerRadius || 0);
+
+    // 文本属性
+    if (node.type === "TEXT") {
+      writer.writeString(node.characters || "");
+      writer.writeVarUint(node.fontSize || 16);
+      const fw = typeof node.fontWeight === "number" ? node.fontWeight : 400;
+      writer.writeVarUint(fw);
+    }
+
+    // 可选 parentId
+    writer.writeString(node.parentId || "");
+  }
+
+  writer.writeByte(0); // 终止标记
+  return writer.toUint8Array();
+}
+
+/**
  * Kiwi 模拟二进制解包器：解析二进制流中的 Figma 节点列表
  */
-export function unpackKiwiBinary(buffer: Uint8Array): FigmaNode[] {
+export function unpackKiwiBinary(buffer: Uint8Array, options: { requireHeader?: boolean } = {}): FigmaNode[] {
   const reader = new KiwiReader(buffer);
-  reader.checkHeader();
+  const hasHeader = reader.checkHeader();
+  if (options.requireHeader !== false && !hasHeader) {
+    return [];
+  }
 
   const nodes: FigmaNode[] = [];
 
@@ -485,6 +675,14 @@ export function unpackKiwiBinary(buffer: Uint8Array): FigmaNode[] {
         node.fontWeight = reader.readVarUint();
       }
 
+      // 若数据流后续包含 parentId 字符串，则提取
+      if (!reader.isEOF()) {
+        const pId = reader.readString();
+        if (pId) {
+          node.parentId = pId;
+        }
+      }
+
       nodes.push(node);
     } catch {
       break;
@@ -496,14 +694,23 @@ export function unpackKiwiBinary(buffer: Uint8Array): FigmaNode[] {
 
 /**
  * 将场景树转换为 FlatStore 的 FEElement 集合
+ * 支持直接写入目标 FlatStore 并建立父子引用关系
  */
-export function sceneToFlatStore(scene: SceneIndex): { elements: FEElement[]; rootId: string; jsx: string } {
+export function sceneToFlatStore(
+  scene: SceneIndex,
+  targetStore?: any,
+  targetParentId?: string
+): { elements: FEElement[]; rootId: string; jsx: string } {
   const { nodeMap, childrenMap, rootIds } = scene;
   const elements: FEElement[] = [];
+  const visited = new Set<string>();
 
   const mainRootId = rootIds[0] || "figma_root";
 
   function traverse(nodeId: string, parentId?: string): void {
+    if (visited.has(nodeId)) return;
+    visited.add(nodeId);
+
     const fNode = nodeMap.get(nodeId);
     if (!fNode) return;
 
@@ -528,17 +735,32 @@ export function sceneToFlatStore(scene: SceneIndex): { elements: FEElement[]; ro
 
     elements.push(el);
 
+    if (targetStore && typeof targetStore.setElement === "function") {
+      targetStore.setElement(el);
+      if (parentId && typeof targetStore.attachChild === "function") {
+        try {
+          targetStore.attachChild(parentId, fNode.id);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     for (const cId of childIds) {
       traverse(cId, nodeId);
     }
   }
 
   for (const rId of rootIds) {
-    traverse(rId);
+    traverse(rId, targetParentId);
   }
 
-  // 构建 JSX 字符串
+  // 构建 JSX 字符串 (带 cycle 防护)
+  const jsxVisited = new Set<string>();
   function buildJsx(nodeId: string, indent: number = 0): string {
+    if (jsxVisited.has(nodeId)) return "";
+    jsxVisited.add(nodeId);
+
     const fNode = nodeMap.get(nodeId);
     if (!fNode) return "";
 
@@ -558,13 +780,40 @@ export function sceneToFlatStore(scene: SceneIndex): { elements: FEElement[]; ro
       return `${spaces}<${tag}${classAttr} />`;
     }
 
-    const inner = childIds.map((c) => buildJsx(c, indent + 1)).join("\n");
+    const inner = childIds.map((c) => buildJsx(c, indent + 1)).filter(Boolean).join("\n");
     return `${spaces}<${tag}${classAttr}>\n${inner}\n${spaces}</${tag}>`;
   }
 
-  const jsx = rootIds.map((rId) => buildJsx(rId, 0)).join("\n");
+  const jsx = rootIds.map((rId) => buildJsx(rId, 0)).filter(Boolean).join("\n");
 
   return { elements, rootId: mainRootId, jsx };
+}
+
+/**
+ * 便捷助手：将 Figma 导入结果直接挂载并附加到 FlatStore 中
+ */
+export function importFigmaToStore(
+  store: any,
+  parsed: FigmaParseResult | SceneIndex,
+  targetParentId?: string
+): string {
+  let scene: SceneIndex;
+  if ("nodeMap" in parsed && "childrenMap" in parsed) {
+    scene = parsed;
+  } else if ("elements" in parsed && Array.isArray(parsed.elements)) {
+    const nodes: FigmaNode[] = parsed.elements.map((el) => ({
+      id: el.id,
+      name: el.tag,
+      type: el.tag === "p" ? "TEXT" : "FRAME",
+      characters: el.textContent
+    }));
+    scene = buildSceneIndex(nodes);
+  } else {
+    throw new Error("Invalid Figma import payload");
+  }
+
+  const result = sceneToFlatStore(scene, store, targetParentId);
+  return result.rootId;
 }
 
 /**
@@ -575,7 +824,16 @@ export function parseFigmaClipboard(input: Uint8Array | string): FigmaParseResul
     let nodes: FigmaNode[] = [];
 
     if (input instanceof Uint8Array) {
-      // 1. 尝试二进制 Kiwi 解码
+      // 优先检测是否为 UTF-8 文本 (如以 { 或 [ 或 < 开头的 JSON/HTML/SVG 字节流)
+      // 避免将普通文本错误地按 Kiwi 二进制解析产生乱码
+      const nonWhitespaceIdx = input.findIndex((b) => b !== 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0d);
+      const firstByte = nonWhitespaceIdx !== -1 ? input[nonWhitespaceIdx] : 0;
+      if (firstByte === 0x7b /* { */ || firstByte === 0x5b /* [ */ || firstByte === 0x3c /* < */) {
+        const text = new TextDecoder("utf-8").decode(input);
+        return parseFigmaClipboard(text);
+      }
+
+      // 1. 尝试二进制 Kiwi 解码 (必须含 magic header)
       nodes = unpackKiwiBinary(input);
       if (nodes.length === 0) {
         // 尝试按 UTF-8 字符串解读
@@ -685,4 +943,169 @@ export function parseFigmaClipboard(input: Uint8Array | string): FigmaParseResul
       error: `Figma parsing error: ${err.message}`
     };
   }
+}
+
+export interface FigmaToReactOptions {
+  componentName?: string;
+  exportType?: "named" | "default";
+  typescript?: boolean;
+  useNextShims?: boolean;
+  includeImports?: boolean;
+}
+
+/**
+ * 将 Figma 节点转换为生产级 React 19 / Tailwind v4 组件代码
+ */
+export function figmaToReact19(
+  input: Uint8Array | string | FigmaNode[] | SceneIndex | FigmaParseResult,
+  options: FigmaToReactOptions = {}
+): {
+  componentName: string;
+  code: string;
+  elements: FEElement[];
+  rootId: string;
+} {
+  let scene: SceneIndex;
+  let rawElements: FEElement[] = [];
+  let rootId: string = "FigmaRoot";
+
+  if (input instanceof Uint8Array || typeof input === "string") {
+    const parsed = parseFigmaClipboard(input);
+    if (!parsed.success) {
+      throw new Error(parsed.error || "Failed to parse Figma input");
+    }
+    rawElements = parsed.elements;
+    rootId = parsed.rootId;
+    const nodes: FigmaNode[] = rawElements.map((el) => ({
+      id: el.id,
+      name: el.tag,
+      type: el.tag === "p" ? "TEXT" : "FRAME",
+      characters: el.textContent
+    }));
+    scene = buildSceneIndex(nodes);
+  } else if ("nodeMap" in input && "childrenMap" in input) {
+    scene = input;
+    const res = sceneToFlatStore(scene);
+    rawElements = res.elements;
+    rootId = res.rootId;
+  } else if ("elements" in input && Array.isArray((input as any).elements)) {
+    const p = input as FigmaParseResult;
+    rawElements = p.elements;
+    rootId = p.rootId;
+    const nodes: FigmaNode[] = rawElements.map((el) => ({
+      id: el.id,
+      name: el.tag,
+      type: el.tag === "p" ? "TEXT" : "FRAME",
+      characters: el.textContent
+    }));
+    scene = buildSceneIndex(nodes);
+  } else if (Array.isArray(input)) {
+    scene = buildSceneIndex(input);
+    const res = sceneToFlatStore(scene);
+    rawElements = res.elements;
+    rootId = res.rootId;
+  } else {
+    throw new Error("Invalid input to figmaToReact19");
+  }
+
+  // 计算组件名称
+  let rawName = options.componentName;
+  if (!rawName) {
+    const rootNode = scene.nodeMap.get(rootId);
+    rawName = rootNode?.name || "FigmaComponent";
+  }
+
+  // 格式化为合法 PascalCase 标识符
+  let componentName = rawName
+    .replace(/[^a-zA-Z0-9_]/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+    .join("");
+
+  if (!componentName || !/^[A-Z]/.test(componentName)) {
+    componentName = "FigmaComponent";
+  }
+
+  // 构建 JSX 节点
+  const { nodeMap, childrenMap, rootIds } = scene;
+  const jsxVisited = new Set<string>();
+
+  function escapeJsxText(text: string): string {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  function renderJsxNode(nodeId: string, indent: number = 2): string {
+    if (jsxVisited.has(nodeId)) return "";
+    jsxVisited.add(nodeId);
+
+    const node = nodeMap.get(nodeId);
+    if (!node) return "";
+
+    const classes = figmaNodeToTailwindClasses(node);
+    const classAttr = classes.length > 0 ? ` className="${classes.join(" ")}"` : "";
+    const childIds = childrenMap.get(nodeId) || [];
+    const spaces = "  ".repeat(indent);
+
+    let tag = "div";
+    if (node.type === "TEXT") tag = "p";
+    else if (node.name.toLowerCase().includes("button")) tag = "button";
+    else if (node.name.toLowerCase().includes("input")) tag = "input";
+    else if (node.name.toLowerCase().includes("card")) tag = "section";
+    else if (node.name.toLowerCase().includes("nav")) tag = "nav";
+    else if (node.name.toLowerCase().includes("header")) tag = "header";
+
+    if (tag === "input") {
+      return `${spaces}<input${classAttr} />`;
+    }
+
+    if (childIds.length === 0) {
+      if (node.characters) {
+        return `${spaces}<${tag}${classAttr}>${escapeJsxText(node.characters)}</${tag}>`;
+      }
+      return `${spaces}<${tag}${classAttr} />`;
+    }
+
+    const childrenJsx = childIds
+      .map((cId) => renderJsxNode(cId, indent + 1))
+      .filter(Boolean)
+      .join("\n");
+
+    return `${spaces}<${tag}${classAttr}>\n${childrenJsx}\n${spaces}</${tag}>`;
+  }
+
+  const innerJsx = rootIds
+    .map((rId) => renderJsxNode(rId, 2))
+    .filter(Boolean)
+    .join("\n");
+
+  const lines: string[] = [];
+  if (options.includeImports !== false) {
+    lines.push('import React from "react";\n');
+  }
+
+  const exportPrefix = options.exportType === "default" ? "export default function" : "export function";
+  lines.push(`${exportPrefix} ${componentName}() {`);
+  lines.push("  return (");
+  if (rootIds.length > 1) {
+    lines.push("    <>");
+    lines.push(innerJsx);
+    lines.push("    </>");
+  } else {
+    lines.push(innerJsx);
+  }
+  lines.push("  );");
+  lines.push("}\n");
+
+  const code = lines.join("\n");
+
+  return {
+    componentName,
+    code,
+    elements: rawElements,
+    rootId
+  };
 }

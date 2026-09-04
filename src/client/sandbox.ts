@@ -85,6 +85,11 @@ export class ComponentSandbox {
       Object.assign(finalProps, shim.props, { "data-next-link": "true" });
     }
 
+    // 注入 data-element-id 用于画布视口选中与悬停关联
+    if (!finalProps["data-element-id"]) {
+      finalProps["data-element-id"] = el.id;
+    }
+
     return {
       tag: finalTag,
       props: finalProps,

@@ -102,4 +102,128 @@ describe("Server - Decoupled Multi-Model AI Gateway", () => {
     assert.ok(res.mergedCode?.includes("border-indigo-500 shadow-sm"));
     assert.equal(res.usage?.total_tokens, 120);
   });
+
+  it("should handle DeepSeek-R1 reasoning_content and markdown codeblock JSON output", async () => {
+    let capturedBody: any = null;
+
+    const mockR1Response = {
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            reasoning_content: "The user wants to add rounded-2xl to the button. Target className is px-4 py-2.",
+            content: "```json\n{\n  \"edits\": [\n    {\n      \"old_string\": \"className=\\\"px-4 py-2\\\"\",\n      \"new_string\": \"className=\\\"px-4 py-2 rounded-2xl\\\"\",\n      \"replace_all\": false\n    }\n  ]\n}\n```"
+          }
+        }
+      ],
+      usage: { prompt_tokens: 50, completion_tokens: 80, total_tokens: 130 }
+    };
+
+    const mockFetch = async (_url: string, init: any) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify(mockR1Response), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    };
+
+    const gateway = new AIGateway({
+      provider: "deepseek",
+      model: "deepseek-reasoner",
+      apiKey: "sk-mock-key",
+      fetchFn: mockFetch as any,
+      mockMode: false
+    });
+
+    const source = `export function Button() { return <button className="px-4 py-2">Click</button>; }`;
+    const res = await gateway.generateAndApply({
+      sourceCode: source,
+      instruction: "Add rounded-2xl corners"
+    });
+
+    assert.equal(res.success, true);
+    assert.ok(res.mergedCode?.includes("rounded-2xl"));
+    assert.equal(res.reasoning, "The user wants to add rounded-2xl to the button. Target className is px-4 py-2.");
+    assert.equal(res.usage?.total_tokens, 130);
+
+    // 确认推理模型不发送 tools 或 temperature 参数
+    assert.equal(capturedBody.tools, undefined);
+    assert.equal(capturedBody.temperature, undefined);
+  });
+
+  it("should extract CoT from <think> tags when reasoning model returns think tags in content", async () => {
+    const mockOllamaR1Response = {
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: "<think>\nAnalyze AST structure.\nTarget element is a heading.\nNeed to add text-2xl.\n</think>\n```json\n{\n  \"edits\": [\n    {\n      \"old_string\": \"<h1>Title</h1>\",\n      \"new_string\": \"<h1 className=\\\"text-2xl\\\">Title</h1>\"\n    }\n  ]\n}\n```"
+          }
+        }
+      ]
+    };
+
+    const mockFetch = async () =>
+      new Response(JSON.stringify(mockOllamaR1Response), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+
+    const gateway = new AIGateway({
+      provider: "ollama",
+      model: "deepseek-r1:7b",
+      fetchFn: mockFetch as any,
+      mockMode: false
+    });
+
+    const source = `export function Page() { return <div><h1>Title</h1></div>; }`;
+    const res = await gateway.generateAndApply({
+      sourceCode: source,
+      instruction: "Enlarge title font"
+    });
+
+    assert.equal(res.success, true);
+    assert.ok(res.mergedCode?.includes('className="text-2xl"'));
+    assert.ok(res.reasoning?.includes("Analyze AST structure"));
+  });
+
+  it("should trigger complete AST rollback defense when syntax errors cannot be recovered", async () => {
+    const gateway = new AIGateway({ mockMode: true });
+    const originalSource = `export function Nav() {\n  return <nav className="flex">Nav</nav>;\n}`;
+
+    // FAIL_SYNTAX_PERMANENT 模拟无法修复的语法错误
+    const res = await gateway.generateAndApply(
+      {
+        sourceCode: originalSource,
+        instruction: "FAIL_SYNTAX_PERMANENT broken update"
+      },
+      { maxRetries: 2 }
+    );
+
+    // 语法防线必须拦截并拒绝合并
+    assert.equal(res.success, false);
+    assert.equal(res.mergedCode, undefined);
+    assert.ok(res.error?.includes("AST validation rejected edits"));
+    assert.equal(res.attempts, 3); // 第 1 次尝试 + 2 次重试
+  });
+
+  it("should defensively reject HTTP error responses from AI model provider", async () => {
+    const mockErrorFetch = async () =>
+      new Response("Rate limit exceeded", { status: 429 });
+
+    const gateway = new AIGateway({
+      provider: "deepseek",
+      apiKey: "sk-mock-key",
+      fetchFn: mockErrorFetch as any,
+      mockMode: false
+    });
+
+    const res = await gateway.generateAndApply({
+      sourceCode: `export const A = () => <div />;`,
+      instruction: "change"
+    });
+
+    assert.equal(res.success, false);
+    assert.ok(res.error?.includes("HTTP 429"));
+  });
 });
