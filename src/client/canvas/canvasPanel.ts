@@ -72,6 +72,11 @@ export class CanvasPanel {
     this.syncSelectionManager();
   }
 
+  public clearRegisteredRects(): void {
+    this.elementRects.clear();
+    this.syncSelectionManager();
+  }
+
   /**
    * 同步所有元素矩形至 SelectionManager
    */

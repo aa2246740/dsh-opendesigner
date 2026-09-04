@@ -38,6 +38,8 @@ describe("Server - DSH plugin form", () => {
     assert.ok(service instanceof OpenDesignerService);
     assert.ok(registeredTools.has("opendesigner_canvas_claim"));
     assert.ok(registeredTools.has("opendesigner_status"));
+    assert.ok(registeredTools.has("opendesigner_rewind"));
+    assert.ok(registeredTools.has("opendesigner_batch_create"));
 
     const listTool = registeredTools.get("opendesigner_canvas_list");
     assert.ok(listTool);

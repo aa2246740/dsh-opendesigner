@@ -3,6 +3,7 @@ import { extraApproveParam, JSON_OUTPUT, toDshParameters, wrapDefineTool } from 
 import { OpenDesignerService, type OpenDesignerConfig } from "./server/index.ts";
 import { detectAiConfigFromEnv } from "./server/aiGateway.ts";
 import { OPEN_DESIGNER_TOOLS } from "./server/mcpTools.ts";
+import { PERSISTENCE_TOOLS } from "./server/persistenceTools.ts";
 
 export const name = "dsh-opendesigner";
 export const inject = ["tools"];
@@ -30,7 +31,7 @@ export function apply(ctx: DshHostContext, config: Config = {}): OpenDesignerSer
     throw new Error("dsh-opendesigner requires ctx.tools.register from DeepSeek Harness");
   }
 
-  for (const tool of OPEN_DESIGNER_TOOLS) {
+  for (const tool of [...OPEN_DESIGNER_TOOLS, ...PERSISTENCE_TOOLS]) {
     register(
       wrapDefineTool({
         name: `opendesigner_${tool.name}`,

@@ -1,12 +1,30 @@
 import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { OpenDesignerService } from "../src/server/index.ts";
 import { detectAiConfigFromEnv } from "../src/server/aiGateway.ts";
 
+const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
 const projectRoot = path.join(root, "test-fixtures/preview-root");
 await fs.mkdir(projectRoot, { recursive: true });
+
+async function ensurePreviewGit(dir) {
+  try {
+    await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: dir });
+  } catch {
+    await execFileAsync("git", ["init", "-b", "main"], { cwd: dir });
+    await execFileAsync(
+      "git",
+      ["-c", "user.email=preview@local", "-c", "user.name=OpenDesigner", "commit", "--allow-empty", "-m", "preview root"],
+      { cwd: dir }
+    );
+  }
+}
+
+await ensurePreviewGit(projectRoot);
 
 const service = new OpenDesignerService({
   projectRoot,
@@ -38,6 +56,20 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/status") {
     send(res, 200, JSON.stringify(service.status()), MIME[".json"]);
+    return;
+  }
+
+  if (url.pathname === "/api/canvas" && req.method === "POST") {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    service.hydrateStore(payload);
+    send(res, 200, JSON.stringify({ success: true }), MIME[".json"]);
+    return;
+  }
+
+  if (url.pathname === "/api/canvas") {
+    send(res, 200, JSON.stringify(service.store.toJSON()), MIME[".json"]);
     return;
   }
 

@@ -12,6 +12,9 @@ This is the product spec for the tree as loaded by DeepSeek Harness. Historical 
 | Tool catalog | `src/server/mcpTools.ts` |
 | Path jail | `src/server/pathJail.ts` |
 | Destructive approval | `src/server/approval.ts` |
+| Checkpoints / Rewind | `src/server/checkpoints.ts` |
+| Working-copy autosave | `.designer/canvas.json` via `atomicWrite.ts` |
+| Agent batch worktrees | `src/server/agentBatch.ts` |
 | Client library | `src/client/*`, bundled to `lib/client.js` (no Babel; Tailwind merge lives in `src/compiler/tailwindMerge.ts`) |
 | Live preview | `preview.html` + `src/client/previewApp.ts` + `scripts/preview-server.mjs` |
 
@@ -32,3 +35,16 @@ Honest behavior:
 ## AI
 
 `AIGateway` is an OpenAI-compatible `chat/completions` client. Mock mode is the default without a key. Provider detection lives in `detectAiConfigFromEnv`.
+
+## Save model
+
+Worktrees are for Agent batches that may rewrite project source. They are not the only Rewind, and they are not spawned per canvas gesture.
+
+1. **Checkpoints / Rewind.** `CheckpointLog` is a bounded stack (50) of canvas JSON plus optional session source files. Host tools: `opendesigner_checkpoint`, `opendesigner_rewind`, `opendesigner_list_checkpoints`. Canvas and source mutations push a checkpoint. Rewind restores the snapshot. No worktree is created.
+2. **Working-copy autosave.** `opendesigner_autosave` and canvas tools write `.designer/canvas.json` with temp-file rename. This is crash safety, not history. Timed preview autosave calls this only.
+3. **Agent batch worktree.** `opendesigner_batch_create` runs `git worktree add` at `.designer/worktrees/<batchId>` on branch `opendesigner/batch-*`. File tools then jail to that worktree. `opendesigner_batch_discard` removes it. `opendesigner_batch_apply` copies jailed files into the main tree, then removes the worktree. No git commit. If the project is not a git repo, create returns `{ code: "GIT_REQUIRED" }`.
+4. **Explicit Save / Apply to project.** `opendesigner_apply_to_project` is gated. It writes the working copy and `.designer/applied.json`. It does not `git commit`.
+5. **Approval policy.** Canvas style/geometry tools are auto-allowed (`destructive` unset). Source writes, apply-to-project, and batch apply are gated. `autoApprove` skips the prompt only. Path jail is always on.
+
+The 38-name catalog is unchanged. Persistence tools are extra host tools with the `opendesigner_` prefix.
+
