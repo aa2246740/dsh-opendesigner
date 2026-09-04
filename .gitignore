@@ -7,6 +7,7 @@ out/
 .env.local
 *.log
 .DS_Store
-.designer/canvas.local.json
+.designer/
 test-fixtures/
+
 

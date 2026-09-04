@@ -184,6 +184,82 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     assert.equal(verifiedRelease.success, true);
   });
 
+  it("should enforce optimistic concurrency with STALE_READ rejection on covering_hash mismatch", async () => {
+    const pageRes = await service.executeTool("canvas_create_page", { name: "OCC Test" });
+    const rootId = pageRes.rootElementId;
+
+    // Read to get real hash
+    const readRes = await service.executeTool("canvas_read", { elementId: rootId });
+    assert.ok(readRes.covering_hash);
+
+    // Try claim with stale/bogus hash -> MUST FAIL
+    const staleClaim = await service.executeTool("canvas_claim", {
+      elementId: rootId,
+      covering_hash: "stale_hash_from_past_version"
+    });
+    assert.equal(staleClaim.success, false);
+    assert.ok(staleClaim.error?.includes("STALE_READ"));
+
+    // Claim with correct hash -> SUCСEEDS
+    const goodClaim = await service.executeTool("canvas_claim", {
+      elementId: rootId,
+      covering_hash: readRes.covering_hash
+    });
+    assert.equal(goodClaim.success, true);
+    await service.executeTool("canvas_release", { claim_id: goodClaim.claimId });
+  });
+
+  it("should allow canvas_delete of child element when claim is held on parent container", async () => {
+    const parentRes = await service.executeTool("canvas_add", { tag: "section", props: { id: "p-sec" } });
+    const parentId = parentRes.elementId;
+    const childRes = await service.executeTool("canvas_add", { tag: "button", parentId });
+    const childId = childRes.elementId;
+
+    // Claim lock on parent
+    const readParent = await service.executeTool("canvas_read", { elementId: parentId });
+    const parentClaim = await service.executeTool("canvas_claim", {
+      elementId: parentId,
+      covering_hash: readParent.covering_hash
+    });
+    assert.equal(parentClaim.success, true);
+
+    // Delete child using parent claim
+    const delRes = await service.executeTool("canvas_delete", {
+      claim_id: parentClaim.claimId,
+      elementId: childId
+    });
+    assert.equal(delRes.success, true);
+    assert.equal(service.store.getElement(childId), undefined);
+
+    // Verify and release
+    await service.executeTool("take_screenshot", { elementId: parentId });
+    const relRes = await service.executeTool("canvas_release", { claim_id: parentClaim.claimId });
+    assert.equal(relRes.success, true);
+  });
+
+  it("should reject canvas_edit when old_string is not found in element", async () => {
+    const btnRes = await service.executeTool("canvas_add", { tag: "button", textContent: "Submit" });
+    const btnId = btnRes.elementId;
+
+    const readRes = await service.executeTool("canvas_read", { elementId: btnId });
+    const claimRes = await service.executeTool("canvas_claim", {
+      elementId: btnId,
+      covering_hash: readRes.covering_hash
+    });
+
+    const editRes = await service.executeTool("canvas_edit", {
+      claim_id: claimRes.claimId,
+      elementId: btnId,
+      old_string: "DefinitelyNotFoundText",
+      new_string: "Cancel"
+    });
+
+    assert.equal(editRes.success, false);
+    assert.ok(editRes.error?.includes("not found"));
+
+    await service.executeTool("canvas_release", { claim_id: claimRes.claimId });
+  });
+
   it("should dispatch design and skills tools", async () => {
     const theme = await service.executeTool("get_theme");
     assert.ok(theme.colors.primary);

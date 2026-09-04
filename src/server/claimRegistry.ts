@@ -23,6 +23,7 @@ export interface ClaimRecord {
 export interface ClaimOptions {
   ttlMs?: number; // 默认 300,000ms (300s)
   holder?: string;
+  expectedHash?: string; // 乐观锁期望哈希（若传入且与 coveringHash 不符，则拦截 STALE_READ）
 }
 
 export class ClaimRegistry {
@@ -51,8 +52,17 @@ export class ClaimRegistry {
     options: ClaimOptions = {}
   ): { success: boolean; claimId?: string; error?: string } {
     const now = Date.now();
-    const existingClaimId = this.activeClaimByElementId.get(elementId);
 
+    // 1. 校验 covering_hash，防止陈旧读取并发覆盖 (OCC / STALE_READ)
+    if (options.expectedHash && coveringHash && options.expectedHash !== coveringHash) {
+      return {
+        success: false,
+        error: `STALE_READ: Covering hash mismatch on element ${elementId}. Current is ${options.expectedHash}, but claim requested ${coveringHash}`
+      };
+    }
+
+    // 2. 检查排他冲突
+    const existingClaimId = this.activeClaimByElementId.get(elementId);
     if (existingClaimId) {
       const existing = this.claimsById.get(existingClaimId);
       if (existing && existing.expiresAt > now && existing.status !== "RELEASED" && existing.status !== "EXPIRED") {
@@ -108,9 +118,14 @@ export class ClaimRegistry {
 
   /**
    * 记录视觉自检验收 (take_screenshot)
+   * 支持通过 elementId 或 claimId 触发验证
    */
-  public recordVerification(elementId: string): { success: boolean; error?: string } {
-    const claimId = this.activeClaimByElementId.get(elementId);
+  public recordVerification(targetIdOrClaimId: string): { success: boolean; error?: string } {
+    let claimId = this.activeClaimByElementId.get(targetIdOrClaimId);
+    if (!claimId && this.claimsById.has(targetIdOrClaimId)) {
+      claimId = targetIdOrClaimId;
+    }
+
     if (!claimId) {
       return { success: true }; // 无锁状态下截图亦允许
     }
@@ -162,8 +177,13 @@ export class ClaimRegistry {
 
   /**
    * 校验特定锁是否有效且持有
+   * 支持通过 isAllowedDescendant 判定父级锁在子树操作中的合法性
    */
-  public validateClaim(claimId: string, elementId?: string): { valid: boolean; error?: string } {
+  public validateClaim(
+    claimId: string,
+    elementId?: string,
+    isAllowedDescendant?: (ancestorId: string, targetId: string) => boolean
+  ): { valid: boolean; error?: string } {
     const record = this.claimsById.get(claimId);
     if (!record) {
       return { valid: false, error: `Claim ${claimId} does not exist` };
@@ -179,6 +199,9 @@ export class ClaimRegistry {
     }
 
     if (elementId && record.elementId !== elementId) {
+      if (isAllowedDescendant && isAllowedDescendant(record.elementId, elementId)) {
+        return { valid: true };
+      }
       return { valid: false, error: `Claim ${claimId} locks element ${record.elementId}, not ${elementId}` };
     }
 

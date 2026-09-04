@@ -361,7 +361,13 @@ export async function dispatchMCPTool(
 
     case "canvas_claim": {
       const { elementId, covering_hash } = args;
-      const res = claims.claim(elementId, covering_hash, { holder: args.holder });
+      const currentJsx = elementId ? elementToJSX(store, elementId) : "";
+      const currentHash = ClaimRegistry.computeCoveringHash(currentJsx);
+
+      const res = claims.claim(elementId, covering_hash, {
+        holder: args.holder,
+        expectedHash: currentHash
+      });
       return res;
     }
 
@@ -381,16 +387,28 @@ export async function dispatchMCPTool(
         textContent: args.textContent
       };
       store.setElement(newEl);
-      if (args.parentId) {
-        store.attachChild(args.parentId, id);
+
+      let targetParentId = args.parentId;
+      if (!targetParentId) {
+        const activePageId = store.getActivePageId();
+        const activePage = store.getPages().find((p) => p.id === activePageId);
+        if (activePage) {
+          targetParentId = activePage.rootElementId;
+        }
       }
+
+      if (targetParentId) {
+        store.attachChild(targetParentId, id);
+      }
+
       if (saveCanvas) await saveCanvas();
       return { success: true, elementId: id };
     }
 
     case "canvas_update": {
       const { claim_id, elementId, props, textContent } = args;
-      const validation = claims.validateClaim(claim_id, elementId);
+      const isDescendant = (anc: string, tgt: string) => store.isDescendant(anc, tgt);
+      const validation = claims.validateClaim(claim_id, elementId, isDescendant);
       if (!validation.valid) return { success: false, error: validation.error };
 
       claims.recordMutation(claim_id);
@@ -407,22 +425,31 @@ export async function dispatchMCPTool(
 
     case "canvas_edit": {
       const { claim_id, elementId, old_string, new_string } = args;
-      const validation = claims.validateClaim(claim_id, elementId);
+      const isDescendant = (anc: string, tgt: string) => store.isDescendant(anc, tgt);
+      const validation = claims.validateClaim(claim_id, elementId, isDescendant);
       if (!validation.valid) return { success: false, error: validation.error };
 
-      claims.recordMutation(claim_id);
       const el = store.getElement(elementId);
       if (!el) return { success: false, error: `Element ${elementId} not found` };
 
+      let replaced = false;
       if (el.textContent && el.textContent.includes(old_string)) {
         el.textContent = el.textContent.replace(old_string, new_string);
+        replaced = true;
       }
 
       for (const [k, v] of Object.entries(el.props)) {
         if (typeof v === "string" && v.includes(old_string)) {
           el.props[k] = v.replace(old_string, new_string);
+          replaced = true;
         }
       }
+
+      if (!replaced) {
+        return { success: false, error: `String "${old_string}" not found in element ${elementId}` };
+      }
+
+      claims.recordMutation(claim_id);
       store.setElement(el);
 
       if (saveCanvas) await saveCanvas();
@@ -431,7 +458,8 @@ export async function dispatchMCPTool(
 
     case "canvas_insert": {
       const { claim_id, targetId, position, element } = args;
-      const validation = claims.validateClaim(claim_id, targetId);
+      const isDescendant = (anc: string, tgt: string) => store.isDescendant(anc, tgt);
+      const validation = claims.validateClaim(claim_id, targetId, isDescendant);
       if (!validation.valid) return { success: false, error: validation.error };
 
       claims.recordMutation(claim_id);
@@ -463,7 +491,8 @@ export async function dispatchMCPTool(
 
     case "canvas_delete": {
       const { claim_id, elementId } = args;
-      const validation = claims.validateClaim(claim_id, elementId);
+      const isDescendant = (anc: string, tgt: string) => store.isDescendant(anc, tgt);
+      const validation = claims.validateClaim(claim_id, elementId, isDescendant);
       if (!validation.valid) return { success: false, error: validation.error };
 
       claims.recordMutation(claim_id);
@@ -585,7 +614,18 @@ export async function dispatchMCPTool(
 
     case "take_screenshot": {
       const elementId = args.elementId || "";
-      claims.recordVerification(elementId);
+      if (elementId) {
+        claims.recordVerification(elementId);
+        // 如果该节点处于被锁定的父级/祖先容器内，同时对祖先节点的锁进行验证标记
+        let parent = store.getParent(elementId);
+        while (parent) {
+          claims.recordVerification(parent.id);
+          parent = store.getParent(parent.id);
+        }
+      }
+      if (args.claim_id) {
+        claims.recordVerification(args.claim_id);
+      }
       // 生成确定性离屏快照 Base64 数据
       const mockPngBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
       return {

@@ -34,12 +34,21 @@ export function getTailwindCategory(token: string): string {
   const prefix = colonIdx !== -1 ? token.slice(0, colonIdx + 1) : "";
   const baseToken = colonIdx !== -1 ? token.slice(colonIdx + 1) : token;
 
-  // 1. 文本相关：细分颜色、字号、对齐、粗细、装饰
+  // 1. 文本相关：细分颜色、字号、对齐、粗细、排版、换行、溢出、透明度
   if (/^text-(xs|sm|base|lg|xl|[2-9]xl)$/.test(baseToken)) {
     return `${prefix}text-size`;
   }
   if (/^text-(left|center|right|justify|start|end)$/.test(baseToken)) {
     return `${prefix}text-align`;
+  }
+  if (/^text-(wrap|nowrap|balance|pretty)$/.test(baseToken)) {
+    return `${prefix}text-wrap`;
+  }
+  if (/^text-(ellipsis|clip)$/.test(baseToken)) {
+    return `${prefix}text-overflow`;
+  }
+  if (/^text-opacity-/.test(baseToken)) {
+    return `${prefix}text-opacity`;
   }
   if (/^text-/.test(baseToken)) {
     return `${prefix}text-color`;
@@ -50,8 +59,11 @@ export function getTailwindCategory(token: string): string {
   if (/^font-(sans|serif|mono)$/.test(baseToken)) {
     return `${prefix}font-family`;
   }
+  if (/^(italic|not-italic)$/.test(baseToken)) {
+    return `${prefix}font-style`;
+  }
 
-  // 2. 背景相关：细分颜色、尺寸、位置、重复
+  // 2. 背景相关：细分颜色、尺寸、位置、重复、剪裁、渐变、透明度
   if (/^bg-(auto|cover|contain)$/.test(baseToken)) {
     return `${prefix}bg-size`;
   }
@@ -60,6 +72,18 @@ export function getTailwindCategory(token: string): string {
   }
   if (/^bg-(repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space)$/.test(baseToken)) {
     return `${prefix}bg-repeat`;
+  }
+  if (/^bg-(clip-border|clip-padding|clip-content|clip-text)$/.test(baseToken) || /^bg-clip-/.test(baseToken)) {
+    return `${prefix}bg-clip`;
+  }
+  if (/^bg-(origin-border|origin-padding|origin-content)$/.test(baseToken) || /^bg-origin-/.test(baseToken)) {
+    return `${prefix}bg-origin`;
+  }
+  if (/^bg-(gradient-to-[trbl]{1,2}|none)$/.test(baseToken) || /^bg-gradient-/.test(baseToken)) {
+    return `${prefix}bg-gradient`;
+  }
+  if (/^bg-opacity-/.test(baseToken)) {
+    return `${prefix}bg-opacity`;
   }
   if (/^bg-/.test(baseToken)) {
     return `${prefix}bg-color`;
@@ -76,6 +100,12 @@ export function getTailwindCategory(token: string): string {
   if (/^border-(solid|dashed|dotted|double|none|hidden)$/.test(baseToken)) {
     return `${prefix}border-style`;
   }
+  if (/^border-(collapse|separate)$/.test(baseToken)) {
+    return `${prefix}border-collapse`;
+  }
+  if (/^border-opacity-/.test(baseToken)) {
+    return `${prefix}border-opacity`;
+  }
   if (/^border-(t|b|l|r)(-\d+)?$/.test(baseToken)) {
     const side = baseToken.match(/^border-(t|b|l|r)/)![1];
     return `${prefix}border-width-${side}`;
@@ -87,10 +117,11 @@ export function getTailwindCategory(token: string): string {
     return `${prefix}border-color`;
   }
 
-  // 4. 内边距 (Padding) 与外边距 (Margin)
+  // 4. 内边距 (Padding) 与外边距 (Margin) - 兼容负外边距互斥，如 -m-4 与 m-4
   const spacingMatch = baseToken.match(/^(-?[mp][xytrbl]?)-/);
   if (spacingMatch) {
-    return `${prefix}${spacingMatch[1]}`;
+    const dir = spacingMatch[1].replace(/^-/, "");
+    return `${prefix}spacing-${dir}`;
   }
 
   // 5. 尺寸与宽高
@@ -119,11 +150,11 @@ export function getTailwindCategory(token: string): string {
 
   // 7. 定位体系
   if (/^(static|fixed|absolute|relative|sticky)$/.test(baseToken)) return `${prefix}position`;
-  if (/^top-/.test(baseToken)) return `${prefix}top`;
-  if (/^right-/.test(baseToken)) return `${prefix}right`;
-  if (/^bottom-/.test(baseToken)) return `${prefix}bottom`;
-  if (/^left-/.test(baseToken)) return `${prefix}left`;
-  if (/^inset-/.test(baseToken)) return `${prefix}inset`;
+  if (/^-?top-/.test(baseToken)) return `${prefix}top`;
+  if (/^-?right-/.test(baseToken)) return `${prefix}right`;
+  if (/^-?bottom-/.test(baseToken)) return `${prefix}bottom`;
+  if (/^-?left-/.test(baseToken)) return `${prefix}left`;
+  if (/^-?inset-/.test(baseToken)) return `${prefix}inset`;
   if (/^z-/.test(baseToken)) return `${prefix}z-index`;
 
   // 8. 效果与状态
@@ -189,6 +220,61 @@ export function updateClassNameDeterministically(
 }
 
 /**
+ * 依据 (targetLine, targetColumn) 精确寻找最匹配的 JSXOpeningElement 节点
+ * 严格支持同一行多元素精确定位，优先选取最内层且包含 targetColumn 的元素
+ */
+export function findBestMatchingOpeningElement(ast: any, targetLine: number, targetColumn: number): any {
+  const trav = (traverse as any).default || traverse;
+  const candidates: Array<{ node: any; contains: boolean; dist: number; range: number }> = [];
+
+  trav(ast, {
+    JSXOpeningElement(path: any) {
+      const node = path.node;
+      const { start, end } = node.loc;
+
+      // 检查 (targetLine, targetColumn) 是否在行号范围内
+      const lineInRange = start.line <= targetLine && targetLine <= end.line;
+      if (!lineInRange) return;
+
+      let contains = false;
+      if (start.line === end.line) {
+        contains = targetColumn >= start.column && targetColumn <= end.column;
+      } else {
+        if (targetLine === start.line) {
+          contains = targetColumn >= start.column;
+        } else if (targetLine === end.line) {
+          contains = targetColumn <= end.column;
+        } else {
+          contains = true;
+        }
+      }
+
+      const dist = Math.abs(start.column - targetColumn);
+      const range = node.end - node.start;
+      candidates.push({ node, contains, dist, range });
+    }
+  });
+
+  if (candidates.length === 0) return null;
+
+  // 排序优先级：
+  // 1. 严格包含 targetColumn 的节点排在最前
+  // 2. 在包含的前提下，开销范围最小的（最内层节点）优先
+  // 3. 若均不包含，则按 start.column 距离 targetColumn 最近的优先
+  candidates.sort((a, b) => {
+    if (a.contains && !b.contains) return -1;
+    if (!a.contains && b.contains) return 1;
+    if (a.contains && b.contains) {
+      return a.range - b.range;
+    }
+    if (a.dist !== b.dist) return a.dist - b.dist;
+    return a.range - b.range;
+  });
+
+  return candidates[0].node;
+}
+
+/**
  * 基于 Babel AST 精准行列号定位的源码就地切片更新
  */
 export function updateSourceCodeDeterministically(request: SlicingEditRequest): SlicingEditResult {
@@ -204,27 +290,8 @@ export function updateSourceCodeDeterministically(request: SlicingEditRequest): 
     return { ok: false, reason: `parse-error: ${err.message}` };
   }
 
-  // 寻找匹配的 JSXOpeningElement
-  let targetOpeningNode: any = null;
-  let minRange = Infinity;
-
-  const trav = (traverse as any).default || traverse;
-  trav(ast, {
-    JSXOpeningElement(path: any) {
-      const node = path.node;
-      const { start, end } = node.loc;
-
-      // 检查目标行列号是否在该 OpeningElement 范围内或在同一行
-      const matchesLine = start.line === targetLine || (start.line <= targetLine && end.line >= targetLine);
-      if (matchesLine) {
-        const range = node.end - node.start;
-        if (range < minRange) {
-          minRange = range;
-          targetOpeningNode = node;
-        }
-      }
-    }
-  });
+  // 寻找精准匹配的 JSXOpeningElement
+  const targetOpeningNode = findBestMatchingOpeningElement(ast, targetLine, targetColumn);
 
   if (!targetOpeningNode) {
     return { ok: false, reason: `target-element-not-found at ${targetLine}:${targetColumn}` };
@@ -277,25 +344,7 @@ export function updateSourceCodeDeterministically(request: SlicingEditRequest): 
 
     // 重新解析以获取准确偏移（若 className 修改改变了字符串长度）
     const freshAst = parse(workingCode, { sourceType: "module", plugins: ["jsx", "typescript"] });
-    let freshNode: any = null;
-    let freshMinRange = Infinity;
-
-    trav(freshAst, {
-      JSXOpeningElement(path: any) {
-        const node = path.node;
-        const matchesLine = node.loc.start.line === targetLine || 
-          (node.loc.start.line <= targetLine && node.loc.end.line >= targetLine);
-        if (matchesLine) {
-          const range = node.end - node.start;
-          if (range < freshMinRange) {
-            freshMinRange = range;
-            freshNode = node;
-          }
-        }
-      }
-    });
-
-    if (!freshNode) freshNode = targetOpeningNode;
+    const freshNode = findBestMatchingOpeningElement(freshAst, targetLine, targetColumn) || targetOpeningNode;
 
     const styleAttr = freshNode.attributes.find(
       (attr: any) => attr.type === "JSXAttribute" && attr.name && attr.name.name === "style"

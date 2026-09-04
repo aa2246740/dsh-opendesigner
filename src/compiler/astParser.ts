@@ -340,25 +340,89 @@ export class ASTParser {
     return expr;
   }
 
+  private scanBalancedBraces(): { content: string; start: number; end: number } {
+    const exprStart = this.pos; // 此时位于 '{'
+    this.pos++; // 跳过 '{'
+    let depth = 1;
+    const innerStart = this.pos;
+
+    while (this.pos < this.length && depth > 0) {
+      const ch = this.code[this.pos];
+      if (ch === "{") {
+        depth++;
+        this.pos++;
+        continue;
+      }
+      if (ch === "}") {
+        depth--;
+        this.pos++;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        this.scanStringLiteral();
+        continue;
+      }
+      if (ch === "`") {
+        this.scanTemplateLiteral();
+        continue;
+      }
+      if (ch === "/" && this.peek(1) === "/") {
+        // 单行注释
+        this.pos += 2;
+        while (this.pos < this.length && this.code[this.pos] !== "\n") {
+          this.pos++;
+        }
+        continue;
+      }
+      if (ch === "/" && this.peek(1) === "*") {
+        // 多行注释
+        this.pos += 2;
+        while (this.pos < this.length && !(this.code[this.pos] === "*" && this.peek(1) === "/")) {
+          this.pos++;
+        }
+        if (this.pos < this.length) this.pos += 2;
+        continue;
+      }
+      this.pos++;
+    }
+
+    if (depth > 0) {
+      this.raiseError("Unclosed JSX expression container", exprStart);
+    }
+
+    const exprEnd = this.pos;
+    return {
+      content: this.code.slice(innerStart, exprEnd - 1),
+      start: exprStart,
+      end: exprEnd
+    };
+  }
+
   private parseJSXAttribute(): JSXAttributeNode | BaseNode {
     const start = this.pos;
-    if (this.code[this.pos] === "{" && this.code.slice(this.pos, this.pos + 4) === "{...") {
-      // JSXSpreadAttribute
-      this.pos += 4;
-      let depth = 1;
-      while (this.pos < this.length && depth > 0) {
-        if (this.code[this.pos] === "{") depth++;
-        else if (this.code[this.pos] === "}") depth--;
-        this.pos++;
+    if (this.code[this.pos] === "{") {
+      // 检查是否为 JSXSpreadAttribute，支持 {...props}、{ ...props }、{... props}
+      let lookahead = this.pos + 1;
+      while (lookahead < this.length && /\s/.test(this.code[lookahead])) {
+        lookahead++;
       }
-      const end = this.pos;
-      return {
-        type: "JSXSpreadAttribute",
-        argument: { type: "Identifier", name: "props" },
-        start,
-        end,
-        loc: this.createLoc(start, end)
-      };
+      if (this.code.slice(lookahead, lookahead + 3) === "...") {
+        const expr = this.scanBalancedBraces();
+        const argName = expr.content.replace(/^\s*\.\.\.\s*/, "").trim();
+        return {
+          type: "JSXSpreadAttribute",
+          argument: {
+            type: "Identifier",
+            name: argName || "props",
+            start,
+            end: expr.end,
+            loc: this.createLoc(start, expr.end)
+          },
+          start,
+          end: expr.end,
+          loc: this.createLoc(start, expr.end)
+        };
+      }
     }
 
     const name = this.parseJSXIdentifier();
@@ -373,52 +437,46 @@ export class ASTParser {
       if (nextCh === '"' || nextCh === "'") {
         value = this.scanStringLiteral();
       } else if (nextCh === "{") {
-        const exprStart = this.pos++;
-        let depth = 1;
-        let innerStart = this.pos;
+        const exprStart = this.pos;
         let innerParsed: BaseNode | null = null;
 
-        // 如果是内联对象 {{ key: value }}
-        this.skipWhitespaceAndComments();
-        if (this.peek(0) === "{") {
+        // 检查是否为内联样式对象 {{ key: value }}
+        let lookahead = this.pos + 1;
+        while (lookahead < this.length && /\s/.test(this.code[lookahead])) {
+          lookahead++;
+        }
+        if (this.code[lookahead] === "{") {
+          this.pos++; // skip outer '{'
+          this.skipWhitespaceAndComments();
           innerParsed = this.parseObjectExpression();
           this.skipWhitespaceAndComments();
           if (this.peek(0) === "}") {
             this.pos++; // skip outer '}'
-            depth = 0;
           }
+          const exprEnd = this.pos;
+          value = {
+            type: "JSXExpressionContainer",
+            expression: innerParsed,
+            start: exprStart,
+            end: exprEnd,
+            loc: this.createLoc(exprStart, exprEnd)
+          };
         } else {
-          while (this.pos < this.length && depth > 0) {
-            const c = this.code[this.pos];
-            if (c === "{") depth++;
-            else if (c === "}") depth--;
-            else if (c === '"' || c === "'") {
-              this.scanStringLiteral();
-              continue;
-            }
-            if (depth > 0) this.pos++;
-          }
-          if (depth === 0) this.pos++; // skip outer '}'
+          const expr = this.scanBalancedBraces();
+          value = {
+            type: "JSXExpressionContainer",
+            expression: {
+              type: "Identifier",
+              name: expr.content.trim(),
+              start: expr.start,
+              end: expr.end,
+              loc: this.createLoc(expr.start, expr.end)
+            },
+            start: expr.start,
+            end: expr.end,
+            loc: this.createLoc(expr.start, expr.end)
+          };
         }
-
-        if (depth > 0) {
-          this.raiseError("Unclosed JSX expression container", exprStart);
-        }
-
-        const exprEnd = this.pos;
-        value = {
-          type: "JSXExpressionContainer",
-          expression: innerParsed || {
-            type: "Identifier",
-            name: this.code.slice(innerStart, exprEnd - 1).trim(),
-            start: innerStart,
-            end: exprEnd - 1,
-            loc: this.createLoc(innerStart, exprEnd - 1)
-          },
-          start: exprStart,
-          end: exprEnd,
-          loc: this.createLoc(exprStart, exprEnd)
-        };
       } else {
         this.raiseError(`Unexpected character '${nextCh}' after '=' in JSX attribute`, this.pos);
       }
@@ -523,6 +581,26 @@ export class ASTParser {
       nameNode = this.parseJSXMemberOrIdentifier();
     }
 
+    this.skipWhitespaceAndComments();
+    // 支持 TypeScript 泛型参数，如 <Component<T> prop="val" />
+    if (this.peek(0) === "<") {
+      this.pos++; // skip '<'
+      let angleDepth = 1;
+      while (this.pos < this.length && angleDepth > 0) {
+        const ch = this.code[this.pos];
+        if (ch === "<") angleDepth++;
+        else if (ch === ">") angleDepth--;
+        else if (ch === '"' || ch === "'") {
+          this.scanStringLiteral();
+          continue;
+        } else if (ch === "`") {
+          this.scanTemplateLiteral();
+          continue;
+        }
+        this.pos++;
+      }
+    }
+
     const attributes: BaseNode[] = [];
     let selfClosing = false;
 
@@ -622,28 +700,12 @@ export class ASTParser {
 
         // 嵌入表达式
         if (this.peek(0) === "{") {
-          const exprStart = this.pos++;
-          let depth = 1;
-          while (this.pos < this.length && depth > 0) {
-            const ch = this.code[this.pos];
-            if (ch === "{") depth++;
-            else if (ch === "}") depth--;
-            else if (ch === '"' || ch === "'") {
-              this.scanStringLiteral();
-              continue;
-            }
-            if (depth > 0) this.pos++;
-          }
-          if (depth > 0) {
-            this.raiseError("Unclosed JSX expression in children", exprStart);
-          }
-          this.pos++; // skip '}'
-          const exprEnd = this.pos;
+          const expr = this.scanBalancedBraces();
           children.push({
             type: "JSXExpressionContainer",
-            start: exprStart,
-            end: exprEnd,
-            loc: this.createLoc(exprStart, exprEnd)
+            start: expr.start,
+            end: expr.end,
+            loc: this.createLoc(expr.start, expr.end)
           });
           continue;
         }

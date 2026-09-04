@@ -39,6 +39,26 @@ describe("Compiler - Tailwind Token Merge", () => {
     assert.ok(!res.includes("hover:bg-red-500"));
     assert.ok(res.includes("hover:bg-blue-500"));
   });
+
+  it("should correctly handle negative and positive margins mutually excluding each other", () => {
+    const res1 = mergeTailwindTokens("m-4 px-2", "-m-6");
+    assert.equal(res1, "px-2 -m-6");
+
+    const res2 = mergeTailwindTokens("-m-4 px-2", "m-6");
+    assert.equal(res2, "px-2 m-6");
+  });
+
+  it("should preserve opacity and clip when updating color tokens", () => {
+    const res1 = mergeTailwindTokens("text-red-500 text-opacity-50", "text-blue-500");
+    assert.ok(res1.includes("text-opacity-50"), "text-opacity-50 must be preserved");
+    assert.ok(res1.includes("text-blue-500"), "text-blue-500 must be present");
+    assert.ok(!res1.includes("text-red-500"), "text-red-500 must be removed");
+
+    const res2 = mergeTailwindTokens("bg-red-500 bg-clip-text", "bg-blue-500");
+    assert.ok(res2.includes("bg-clip-text"), "bg-clip-text must be preserved");
+    assert.ok(res2.includes("bg-blue-500"), "bg-blue-500 must be present");
+    assert.ok(!res2.includes("bg-red-500"), "bg-red-500 must be removed");
+  });
 });
 
 describe("Compiler - Deterministic Source Editing", () => {
@@ -113,6 +133,46 @@ describe("Compiler - Deterministic Source Editing", () => {
     assert.equal(res.ok, true);
     assert.ok(res.code?.includes('color: "blue"'));
     assert.ok(res.code?.includes("fontSize: 14"));
+  });
+
+  it("should accurately target specific element when multiple elements reside on the same line", () => {
+    const source = `<div><span className="first">1</span><span className="second">2</span></div>`;
+
+    // 针对第二个 span 进行修改 (col 40 在第二个 span 范围内)
+    const res = updateSourceCodeDeterministically({
+      sourceCode: source,
+      targetLine: 1,
+      targetColumn: 40,
+      newClassName: "second-updated"
+    });
+
+    assert.equal(res.ok, true);
+    assert.ok(res.code?.includes('<span className="second second-updated">2</span>'));
+    assert.ok(res.code?.includes('<span className="first">1</span>'));
+    assert.ok(!res.code?.includes('<div className='));
+  });
+
+  it("should parse and edit TSX elements with TypeScript generic type arguments and spaced spreads", () => {
+    const source = `export function Table() {
+  return (
+    <DataTable<User, number> { ...tableProps } className="bg-red-500 p-4">
+      <Column key="name" />
+    </DataTable>
+  );
+}`;
+
+    const res = updateSourceCodeDeterministically({
+      sourceCode: source,
+      targetLine: 3,
+      targetColumn: 5,
+      newClassName: "bg-blue-500 p-6"
+    });
+
+    assert.equal(res.ok, true);
+    assert.ok(res.code?.includes('className="bg-blue-500 p-6"'));
+    assert.ok(!res.code?.includes("bg-red-500"));
+    assert.ok(!res.code?.includes("p-4"));
+    assert.ok(res.code?.includes('<DataTable<User, number> { ...tableProps }'));
   });
 });
 
