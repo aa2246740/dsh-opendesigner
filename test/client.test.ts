@@ -184,3 +184,29 @@ describe("Client - next-shims Runtime Stubs", () => {
     assert.equal(custom.className, "font-customfont");
   });
 });
+
+describe("Client - DSH Web Client Artifact lib/client.js", () => {
+  it("should register with window.__ModuleLoader__ and export client capabilities", async () => {
+    let loaderEntry: any = null;
+    (globalThis as any).window = globalThis;
+    (globalThis as any).window.__ModuleLoader__ = {
+      load: (entry: any) => {
+        loaderEntry = entry;
+      }
+    };
+
+    // Dynamically import lib/client.js
+    const clientModule = await import("../lib/client.js");
+    assert.ok(loaderEntry);
+    assert.equal(loaderEntry.id, "dsh-opendesigner");
+
+    const exported = loaderEntry.factory();
+    assert.ok(exported.InfiniteCanvasViewport);
+    assert.ok(exported.SelectionManager);
+    assert.ok(exported.worldToScreen);
+
+    const clientState = exported.initDesignerClient();
+    assert.equal(clientState.viewport.getZoom(), 1.0);
+    assert.equal(clientState.selectedElementIds.length, 0);
+  });
+});

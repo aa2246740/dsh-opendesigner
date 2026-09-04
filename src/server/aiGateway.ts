@@ -1,0 +1,362 @@
+/**
+ * 解耦型多模型 AI 网关 (Any-Model AI Gateway)
+ * 原生支持 DeepSeek-V3 / DeepSeek-R1、OpenAI (GPT-4o) 及 Ollama/vLLM 本地模型
+ * 生成严格符合 JSON Schema 的结构化代码切片补丁，并配合 aiMerge 的 AST 语法防线
+ */
+
+import { SAVE_TO_CODE_JSON_SCHEMA, applySurgicalEdits } from "../compiler/aiMerge.ts";
+import type { CodePatchEdit } from "../compiler/aiMerge.ts";
+
+export type AIProvider = "deepseek" | "openai" | "ollama" | "custom";
+
+export interface AIGatewayConfig {
+  provider?: AIProvider;
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  fetchFn?: typeof fetch;
+  mockMode?: boolean;
+}
+
+export interface GenerateEditsRequest {
+  sourceCode: string;
+  instruction: string;
+  componentName?: string;
+  context?: {
+    canvasElements?: any[];
+    themeTokens?: any;
+    screenshotUrl?: string;
+  };
+}
+
+export interface GenerateEditsResult {
+  success: boolean;
+  edits?: CodePatchEdit[];
+  mergedCode?: string;
+  model?: string;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  rawOutput?: string;
+  error?: string;
+  attempts?: number;
+}
+
+export const PROVIDER_DEFAULTS: Record<AIProvider, { baseURL: string; defaultModel: string }> = {
+  deepseek: {
+    baseURL: "https://api.deepseek.com/v1",
+    defaultModel: "deepseek-chat" // DeepSeek-V3
+  },
+  openai: {
+    baseURL: "https://api.openai.com/v1",
+    defaultModel: "gpt-4o"
+  },
+  ollama: {
+    baseURL: "http://localhost:11434/v1",
+    defaultModel: "qwen2.5-coder:latest"
+  },
+  custom: {
+    baseURL: "http://localhost:8000/v1",
+    defaultModel: "default-model"
+  }
+};
+
+export class AIGateway {
+  public provider: AIProvider;
+  public apiKey: string;
+  public baseURL: string;
+  public model: string;
+  public temperature: number;
+  public maxTokens: number;
+  private fetchFn: typeof fetch;
+  public mockMode: boolean;
+
+  constructor(config: AIGatewayConfig = {}) {
+    this.provider = config.provider || "deepseek";
+    const defaults = PROVIDER_DEFAULTS[this.provider] || PROVIDER_DEFAULTS.deepseek;
+
+    this.baseURL = config.baseURL || defaults.baseURL;
+    this.model = config.model || defaults.defaultModel;
+    this.apiKey = config.apiKey || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || "";
+    this.temperature = config.temperature ?? 0.2;
+    this.maxTokens = config.maxTokens ?? 4096;
+    this.fetchFn = config.fetchFn || (typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : (async () => {}) as any);
+    this.mockMode = config.mockMode ?? (!this.apiKey && !config.baseURL);
+  }
+
+  /**
+   * 构建系统级提示词，强制约束结构化代码切片输出与 AST 语法安全
+   */
+  private buildSystemPrompt(): string {
+    return [
+      "You are the OpenDesigner Visual Code Agent for DeepSeek Harness.",
+      "Your objective is to generate minimal, surgical find-and-replace text edits for React 19 + Tailwind CSS components.",
+      "Rules:",
+      "1. Target EXACT characters in `old_string` from the provided source.",
+      "2. `new_string` must keep the code syntactically valid TypeScript/JSX.",
+      "3. Use Tailwind v4 utility classes wherever styling changes are requested.",
+      "4. Do NOT rewrite the whole file; only return surgical edits.",
+      "5. You MUST output strictly structured JSON matching the `save_to_code_edits` schema."
+    ].join("\n");
+  }
+
+  /**
+   * 构建用户消息内容
+   */
+  private buildUserMessage(req: GenerateEditsRequest): string {
+    let msg = `### SOURCE FILE:\n\`\`\`tsx\n${req.sourceCode}\n\`\`\`\n\n`;
+    if (req.componentName) {
+      msg += `### TARGET COMPONENT: ${req.componentName}\n\n`;
+    }
+    if (req.context?.themeTokens) {
+      msg += `### DESIGN TOKENS:\n${JSON.stringify(req.context.themeTokens, null, 2)}\n\n`;
+    }
+    msg += `### INSTRUCTION:\n${req.instruction}\n\n`;
+    msg += `Respond ONLY with the surgical edits.`;
+    return msg;
+  }
+
+  /**
+   * 调用大模型并经过 AST 语法防线验证应用变更
+   */
+  public async generateAndApply(
+    req: GenerateEditsRequest,
+    options: { maxRetries?: number } = {}
+  ): Promise<GenerateEditsResult> {
+    const maxRetries = options.maxRetries ?? 1;
+    let attempts = 0;
+    let lastError = "";
+
+    while (attempts <= maxRetries) {
+      attempts++;
+      try {
+        const editsRes = await this.requestEdits(req, lastError);
+        if (!editsRes.success || !editsRes.edits) {
+          lastError = editsRes.error || "Failed to generate edits";
+          continue;
+        }
+
+        // 调用 Tier 2 AST 语法防线
+        const mergeRes = applySurgicalEdits(req.sourceCode, editsRes.edits);
+        if (!mergeRes.success) {
+          lastError = `AST validation rejected edits: ${mergeRes.error}`;
+          continue;
+        }
+
+        return {
+          success: true,
+          edits: editsRes.edits,
+          mergedCode: mergeRes.result,
+          model: this.model,
+          usage: editsRes.usage,
+          rawOutput: editsRes.rawOutput,
+          attempts
+        };
+      } catch (err: any) {
+        lastError = err.message || String(err);
+      }
+    }
+
+    return {
+      success: false,
+      error: `AI Merge failed after ${attempts} attempts: ${lastError}`,
+      attempts
+    };
+  }
+
+  /**
+   * 执行网络请求或模拟输出生成结构化代码补丁
+   */
+  public async requestEdits(
+    req: GenerateEditsRequest,
+    feedbackError?: string
+  ): Promise<{
+    success: boolean;
+    edits?: CodePatchEdit[];
+    usage?: any;
+    rawOutput?: string;
+    error?: string;
+  }> {
+    // 离线/测试模拟模式
+    if (this.mockMode) {
+      return this.generateMockEdits(req, feedbackError);
+    }
+
+    const messages = [
+      { role: "system", content: this.buildSystemPrompt() },
+      { role: "user", content: this.buildUserMessage(req) }
+    ];
+
+    if (feedbackError) {
+      messages.push({
+        role: "user",
+        content: `Your previous patch caused a syntax error: ${feedbackError}. Please correct the edits and return valid code.`
+      });
+    }
+
+    const endpoint = `${this.baseURL.replace(/\/+$/, "")}/chat/completions`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json"
+    };
+    if (this.apiKey) {
+      headers["Authorization"] = `Bearer ${this.apiKey}`;
+    }
+
+    const requestBody: any = {
+      model: this.model,
+      messages,
+      temperature: this.temperature,
+      max_tokens: this.maxTokens,
+      tools: [
+        {
+          type: "function",
+          function: SAVE_TO_CODE_JSON_SCHEMA
+        }
+      ],
+      tool_choice: {
+        type: "function",
+        function: { name: "save_to_code_edits" }
+      }
+    };
+
+    const response = await this.fetchFn(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      return {
+        success: false,
+        error: `AI gateway HTTP ${response.status}: ${errText}`
+      };
+    }
+
+    const json: any = await response.json();
+    const choice = json.choices?.[0];
+    if (!choice) {
+      return { success: false, error: "Empty choices in model response" };
+    }
+
+    // 1. 尝试从 Tool Call 中提取结构化参数
+    const toolCalls = choice.message?.tool_calls;
+    if (toolCalls && toolCalls.length > 0) {
+      const call = toolCalls[0];
+      try {
+        const parsed = JSON.parse(call.function.arguments);
+        if (Array.isArray(parsed.edits)) {
+          return {
+            success: true,
+            edits: parsed.edits,
+            usage: json.usage,
+            rawOutput: call.function.arguments
+          };
+        }
+      } catch (err: any) {
+        return { success: false, error: `Invalid tool call JSON: ${err.message}` };
+      }
+    }
+
+    // 2. 尝试从正文解析 JSON
+    const content = choice.message?.content || "";
+    try {
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (Array.isArray(parsed.edits)) {
+          return {
+            success: true,
+            edits: parsed.edits,
+            usage: json.usage,
+            rawOutput: content
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return {
+      success: false,
+      error: `Could not parse edits from model completion: ${content.slice(0, 100)}`
+    };
+  }
+
+  /**
+   * 离线确定性模拟生成器（用于单元测试及无网络环境安全自测）
+   */
+  private generateMockEdits(
+    req: GenerateEditsRequest,
+    feedbackError?: string
+  ): {
+    success: boolean;
+    edits?: CodePatchEdit[];
+    usage?: any;
+    rawOutput?: string;
+    error?: string;
+  } {
+    const { sourceCode, instruction } = req;
+
+    // 模拟语法错误重试场景
+    if (instruction.includes("FAIL_THEN_FIX") && !feedbackError) {
+      return {
+        success: true,
+        edits: [
+          {
+            old_string: "<button",
+            new_string: "<button unclosed_bracket {"
+          }
+        ]
+      };
+    }
+
+    // 针对常见指令做确定性切片映射
+    if (instruction.includes("bg-") || instruction.includes("color")) {
+      const match = sourceCode.match(/className="([^"]*)"/);
+      if (match) {
+        const oldClass = match[0];
+        const newClass = `className="${match[1]} bg-blue-600 text-white"`;
+        return {
+          success: true,
+          edits: [{ old_string: oldClass, new_string: newClass }]
+        };
+      }
+    }
+
+    if (instruction.includes("rounded")) {
+      const match = sourceCode.match(/className="([^"]*)"/);
+      if (match) {
+        return {
+          success: true,
+          edits: [
+            {
+              old_string: match[0],
+              new_string: `className="${match[1]} rounded-xl"`
+            }
+          ]
+        };
+      }
+    }
+
+    // 通用文本内容替换测试
+    const textMatch = sourceCode.match(/>([^<>{}\n]+)</);
+    if (textMatch && textMatch[1].trim()) {
+      const oldText = textMatch[1].trim();
+      return {
+        success: true,
+        edits: [
+          {
+            old_string: oldText,
+            new_string: `${oldText} Updated`
+          }
+        ]
+      };
+    }
+
+    return {
+      success: true,
+      edits: []
+    };
+  }
+}

@@ -6,9 +6,15 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./client": "./src/client/index.ts",
+    "./client": {
+      "types": "./src/client/index.ts",
+      "import": "./src/client/index.ts",
+      "default": "./lib/client.js"
+    },
     "./server": "./src/server/index.ts",
     "./compiler": "./src/compiler/sourceEdit.ts",
+    "./figma": "./src/compiler/figmaParser.ts",
+    "./ai": "./src/server/aiGateway.ts",
     "./store": "./src/store/flatStore.ts",
     "./next-shims": "./src/client/next-shims/index.ts",
     "./next-shims/*": "./src/client/next-shims/*.ts"

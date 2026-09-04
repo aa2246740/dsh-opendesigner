@@ -189,6 +189,8 @@ export function mergeTailwindTokens(existingClasses: string, tokensToAddOrReplac
   return currentTokens.join(" ");
 }
 
+export const mergeTailwindClasses = mergeTailwindTokens;
+
 /**
  * 基于精确切片区间的 className 更新
  */
