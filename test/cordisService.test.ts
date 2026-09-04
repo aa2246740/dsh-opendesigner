@@ -4,7 +4,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { apply, name as pluginName, inject as pluginInject } from "../src/plugin.ts";
 import { OpenDesignerService } from "../src/server/index.ts";
+import { JSON_OUTPUT } from "../src/server/dshAdapter.ts";
 import type { CordisToolDef } from "../src/server/cordis.ts";
+import { assertSupportedJsonSchema } from "@deepseek-ai/dsh-tools";
 
 const CORDIS_TEST_DIR = path.resolve(process.cwd(), "test-fixtures/cordis-test");
 
@@ -62,8 +64,12 @@ describe("Server - DSH plugin form", () => {
     const status = registeredTools.get("opendesigner_status");
     assert.ok(status);
     assert.notEqual(status.output?.schema?.type, "json");
+    assert.doesNotThrow(() => assertSupportedJsonSchema(status.output.schema));
+    assert.doesNotThrow(() => assertSupportedJsonSchema(JSON_OUTPUT.schema));
     const write = registeredTools.get("opendesigner_project_write");
     assert.equal(write.parameters?.type, "object");
+    assert.doesNotThrow(() => assertSupportedJsonSchema(write.parameters));
+    assert.doesNotThrow(() => assertSupportedJsonSchema(write.output.schema));
   });
 
   it("saves canvas on stop", async () => {

@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import type { MCPToolDefinition } from "./mcpTools.ts";
@@ -8,12 +8,19 @@ export interface DshToolParameters {
   [key: string]: Record<string, unknown>;
 }
 
+export interface HostJsonSchema {
+  type: "object";
+  additionalProperties: boolean;
+  properties?: Record<string, unknown>;
+  required?: string[];
+}
+
 export interface DshToolDefinition {
   name: string;
   description: string;
   parameters: DshToolParameters;
   output: {
-    schema: { type: "json" };
+    schema: HostJsonSchema;
     render: (_args: unknown, value: unknown) => Array<{ type: "text"; text: string }>;
   };
   execute: (
@@ -32,7 +39,7 @@ export interface DshHostContext {
 }
 
 export const JSON_OUTPUT = {
-  schema: { type: "json" as const },
+  schema: { type: "object" as const, additionalProperties: true },
   render: (_args: unknown, value: unknown) => [
     { type: "text" as const, text: JSON.stringify(value, null, 2) }
   ]
@@ -89,7 +96,12 @@ function convertNode(spec: Record<string, unknown>, required: boolean): Record<s
 }
 
 function defineToolResolvers(): string[] {
-  const bases = [import.meta.url, pathToFileURL(path.join(process.cwd(), "package.json")).href];
+  const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const bases = [
+    import.meta.url,
+    pathToFileURL(path.join(pluginRoot, "package.json")).href,
+    pathToFileURL(path.join(process.cwd(), "package.json")).href
+  ];
   const home = process.env.DSH_HOME;
   if (home) {
     try {
@@ -103,6 +115,25 @@ function defineToolResolvers(): string[] {
     }
   }
   return bases;
+}
+
+function parametersToJsonSchema(params: DshToolParameters): HostJsonSchema {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const [key, spec] of Object.entries(params)) {
+    const node: Record<string, unknown> = { ...spec };
+    if (node.required === true) {
+      required.push(key);
+      delete node.required;
+    }
+    properties[key] = node;
+  }
+  return {
+    type: "object",
+    additionalProperties: true,
+    properties,
+    ...(required.length > 0 ? { required } : {})
+  };
 }
 
 function loadDefineTool(): ((def: unknown) => unknown) | undefined {
@@ -121,11 +152,18 @@ function loadDefineTool(): ((def: unknown) => unknown) | undefined {
 }
 
 export function wrapDefineTool(def: DshToolDefinition): unknown {
+  const hostDef: DshToolDefinition = {
+    ...def,
+    output: JSON_OUTPUT
+  };
   const defineTool = loadDefineTool();
   if (defineTool) {
-    return defineTool(def);
+    return defineTool(hostDef);
   }
-  return def;
+  return {
+    ...hostDef,
+    parameters: parametersToJsonSchema(def.parameters)
+  };
 }
 
 export function extraApproveParam(tool: MCPToolDefinition): DshToolParameters {
