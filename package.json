@@ -1,0 +1,36 @@
+{
+  "name": "dsh-opendesigner",
+  "version": "0.1.0",
+  "description": "An open-source, multi-model, local-first visual React component designer for DeepSeek Harness (inspired by Lunagraph)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -w",
+    "test": "node --test"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "visual-editor",
+    "react19",
+    "tailwind",
+    "mcp",
+    "ast-codegen",
+    "build-in-public"
+  ],
+  "author": "OpenDesigner Community",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.26.0",
+    "@babel/traverse": "^7.26.0",
+    "@babel/types": "^7.26.0"
+  }
+}
