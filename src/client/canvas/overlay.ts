@@ -57,7 +57,7 @@ export class SelectionOverlayRenderer {
   public renderSvgOverlay(
     box: Rect | null,
     guides: SnapGuide[] = [],
-    options: { width?: number; height?: number } = {}
+    options: { width?: number; height?: number; marquee?: Rect | null } = {}
   ): string {
     const svgWidth = options.width || 2000;
     const svgHeight = options.height || 2000;
@@ -85,6 +85,17 @@ export class SelectionOverlayRenderer {
       }
     }
 
+    const HANDLE_TOOLTIPS: Record<string, string> = {
+      nw: "Resize top-left",
+      n: "Resize top",
+      ne: "Resize top-right",
+      e: "Resize right",
+      se: "Resize bottom-right",
+      s: "Resize bottom",
+      sw: "Resize bottom-left",
+      w: "Resize left"
+    };
+
     // 2. 渲染选区主外边框与 8 向控制点
     if (box) {
       parts.push(
@@ -95,13 +106,21 @@ export class SelectionOverlayRenderer {
       const handles = this.computeHandles(box);
 
       for (const h of handles) {
+        const tip = HANDLE_TOOLTIPS[h.handle] || `Resize ${h.handle}`;
         parts.push(
-          `<g class="resize-handle-group" data-handle="${h.handle}" data-testid="overlay-handle-${h.handle}" style="pointer-events:auto;cursor:${h.cursor};">
-            <title>Resize ${h.handle}</title>
+          `<g class="resize-handle-group" data-handle="${h.handle}" data-testid="overlay-handle-${h.handle}" data-tooltip="${tip}" style="pointer-events:auto;cursor:${h.cursor};">
+            <title>${tip}</title>
             <rect class="resize-handle handle-${h.handle}" x="${h.point.x - half}" y="${h.point.y - half}" width="${this.handleSize}" height="${this.handleSize}" fill="#ffffff" stroke="${this.strokeColor}" stroke-width="1.5" />
           </g>`
         );
       }
+    }
+
+    const marquee = options.marquee;
+    if (marquee && (marquee.width > 1 || marquee.height > 1)) {
+      parts.push(
+        `<rect class="marquee-band" data-testid="marquee-band" x="${marquee.left}" y="${marquee.top}" width="${marquee.width}" height="${marquee.height}" fill="rgba(96,165,250,0.16)" stroke="#60a5fa" stroke-width="1" stroke-dasharray="4 3" />`
+      );
     }
 
     parts.push(`</svg>`);

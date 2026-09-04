@@ -100,10 +100,13 @@ const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-    const result = await service.aiGateway.generateAndApply({
-      sourceCode: payload.sourceCode,
-      instruction: payload.instruction
-    });
+    const result = await service.aiGateway.generateAndApply(
+      {
+        sourceCode: payload.sourceCode,
+        instruction: payload.instruction
+      },
+      { fallbackToMock: true }
+    );
     send(
       res,
       200,
@@ -112,7 +115,9 @@ const server = http.createServer(async (req, res) => {
         mergedCode: result.mergedCode,
         model: result.model,
         error: result.error,
-        mockMode: service.aiGateway.mockMode
+        mockMode: service.aiGateway.mockMode,
+        fallback: result.fallback === true,
+        liveError: result.liveError || null
       }),
       MIME[".json"]
     );

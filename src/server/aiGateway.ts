@@ -41,6 +41,8 @@ export interface GenerateEditsResult {
   reasoning?: string;
   error?: string;
   attempts?: number;
+  fallback?: boolean;
+  liveError?: string;
 }
 
 export const DEEPSEEK_MODELS = {
@@ -195,7 +197,7 @@ export class AIGateway {
    */
   public async generateAndApply(
     req: GenerateEditsRequest,
-    options: { maxRetries?: number } = {}
+    options: { maxRetries?: number; fallbackToMock?: boolean } = {}
   ): Promise<GenerateEditsResult> {
     const maxRetries = options.maxRetries ?? 1;
     let attempts = 0;
@@ -229,6 +231,24 @@ export class AIGateway {
         };
       } catch (err: any) {
         lastError = err.message || String(err);
+      }
+    }
+
+    if (options.fallbackToMock && !this.mockMode) {
+      const mock = this.generateMockEdits(req);
+      if (mock.success && mock.edits && mock.edits.length > 0) {
+        const mergeRes = applySurgicalEdits(req.sourceCode, mock.edits);
+        if (mergeRes.success) {
+          return {
+            success: true,
+            edits: mock.edits,
+            mergedCode: mergeRes.result,
+            model: "mock-offline",
+            attempts,
+            fallback: true,
+            liveError: lastError
+          };
+        }
       }
     }
 
@@ -496,6 +516,21 @@ export class AIGateway {
         return {
           success: true,
           edits: [{ old_string: oldClass, new_string: newClass }]
+        };
+      }
+    }
+
+    if (instruction.includes("shadow")) {
+      const match = sourceCode.match(/className="([^"]*)"/);
+      if (match) {
+        return {
+          success: true,
+          edits: [
+            {
+              old_string: match[0],
+              new_string: `className="${match[1]} shadow-lg"`
+            }
+          ]
         };
       }
     }

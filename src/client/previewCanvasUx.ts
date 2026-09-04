@@ -8,6 +8,7 @@ import type { CanvasPanel } from "./canvas/canvasPanel.ts";
 import type { FlatStore } from "../store/flatStore.ts";
 
 const RESIZE_HANDLES = new Set<string>(["nw", "n", "ne", "e", "se", "s", "sw", "w"]);
+const MARQUEE_CLICK_PX = 4;
 
 export interface PreviewCanvasUxHooks {
   onCommit: (label: string) => void;
@@ -48,7 +49,8 @@ export function refreshOverlay(canvasEl: HTMLElement, panel: CanvasPanel): void 
   if (host) {
     host.innerHTML = panel.overlay.renderSvgOverlay(
       panel.getSelectedBoundingBox(),
-      panel.controller.getGuides()
+      panel.controller.getGuides(),
+      { marquee: panel.controller.getMarqueeRect() }
     );
   }
   const layer = canvasEl.querySelector(".canvas-viewport-layer") as HTMLElement | null;
@@ -62,6 +64,71 @@ function endInteraction(panel: CanvasPanel): void {
   if (mode === "panning") panel.controller.endPan();
   else if (mode === "dragging") panel.controller.endDrag();
   else if (mode === "resizing") panel.controller.endResize();
+  else if (mode === "box-selecting") panel.controller.endBoxSelect();
+}
+
+export function bindFloatingTooltips(root: HTMLElement): () => void {
+  let tip = root.querySelector("[data-testid='editor-tooltip']") as HTMLElement | null;
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.className = "od-float-tip";
+    tip.setAttribute("data-testid", "editor-tooltip");
+    tip.hidden = true;
+    root.appendChild(tip);
+  }
+
+  let hideTimer = 0;
+  const show = (text: string, x: number, y: number): void => {
+    window.clearTimeout(hideTimer);
+    tip!.hidden = false;
+    tip!.textContent = text;
+    const pad = 12;
+    const maxX = window.innerWidth - tip!.offsetWidth - 8;
+    const maxY = window.innerHeight - tip!.offsetHeight - 8;
+    tip!.style.left = `${Math.max(8, Math.min(maxX, x + pad))}px`;
+    tip!.style.top = `${Math.max(8, Math.min(maxY, y + pad))}px`;
+  };
+  const hide = (): void => {
+    hideTimer = window.setTimeout(() => {
+      tip!.hidden = true;
+      tip!.textContent = "";
+    }, 80);
+  };
+
+  const onOver = (event: PointerEvent): void => {
+    const target = event.target as Element | null;
+    const el = target?.closest?.("[data-tooltip]") as HTMLElement | null;
+    if (!el) {
+      hide();
+      return;
+    }
+    const text = el.getAttribute("data-tooltip");
+    if (!text) {
+      hide();
+      return;
+    }
+    show(text, event.clientX, event.clientY);
+  };
+  const onMove = (event: PointerEvent): void => {
+    if (tip!.hidden) return;
+    const el = (event.target as Element | null)?.closest?.("[data-tooltip]");
+    if (el) show(el.getAttribute("data-tooltip") || "", event.clientX, event.clientY);
+  };
+  const onOut = (event: PointerEvent): void => {
+    const next = event.relatedTarget as Element | null;
+    if (next && root.contains(next) && next.closest("[data-tooltip]")) return;
+    hide();
+  };
+
+  root.addEventListener("pointerover", onOver);
+  root.addEventListener("pointermove", onMove);
+  root.addEventListener("pointerout", onOut);
+
+  return () => {
+    root.removeEventListener("pointerover", onOver);
+    root.removeEventListener("pointermove", onMove);
+    root.removeEventListener("pointerout", onOut);
+  };
 }
 
 export function bindPreviewCanvasUx(
@@ -74,6 +141,9 @@ export function bindPreviewCanvasUx(
   let pointerId: number | null = null;
   let didMutate = false;
   let commitLabel = "canvas-gesture";
+  let marqueeAdditive = false;
+  let marqueeBaseIds: string[] = [];
+  let pointerStart: { x: number; y: number } | null = null;
 
   const liveSync = (): void => {
     applyRectsToDom(canvasEl, panel, store);
@@ -92,6 +162,7 @@ export function bindPreviewCanvasUx(
     canvasEl.focus({ preventScroll: true });
     event.preventDefault();
     pointerId = event.pointerId;
+    pointerStart = { ...screen };
     try {
       canvasEl.setPointerCapture(event.pointerId);
     } catch {
@@ -107,13 +178,19 @@ export function bindPreviewCanvasUx(
       return;
     }
 
-    const panRequested = event.button === 1 || spaceDown || event.altKey || !nodeId;
+    const panRequested = event.button === 1 || spaceDown || event.altKey;
     if (panRequested) {
-      if (!nodeId && !event.shiftKey && event.button === 0 && !spaceDown) {
-        panel.selection.clearSelection();
-      }
       panel.controller.startPan(screen);
       commitLabel = "pan";
+      liveSync();
+      return;
+    }
+
+    if (!nodeId) {
+      marqueeAdditive = event.shiftKey;
+      marqueeBaseIds = marqueeAdditive ? panel.selection.getSelectedIds() : [];
+      panel.controller.startBoxSelect(screen);
+      commitLabel = "marquee";
       liveSync();
       return;
     }
@@ -141,6 +218,11 @@ export function bindPreviewCanvasUx(
       hooks.onHud();
       return;
     }
+    if (mode === "box-selecting") {
+      panel.updateMarquee(screen, marqueeAdditive, marqueeBaseIds);
+      liveSync();
+      return;
+    }
     if (mode === "dragging") {
       const res = panel.moveSelected(screen);
       if (res) didMutate = true;
@@ -157,8 +239,23 @@ export function bindPreviewCanvasUx(
   const onPointerUp = (event: PointerEvent): void => {
     if (pointerId === null || event.pointerId !== pointerId) return;
     const mode = panel.controller.getMode();
-    endInteraction(panel);
+    const screen = canvasPointFromEvent(canvasEl, event.clientX, event.clientY);
+    if (mode === "box-selecting") {
+      const dx = pointerStart ? screen.x - pointerStart.x : 0;
+      const dy = pointerStart ? screen.y - pointerStart.y : 0;
+      const dist = Math.hypot(dx, dy);
+      if (dist < MARQUEE_CLICK_PX) {
+        if (!marqueeAdditive) panel.selection.clearSelection();
+        panel.controller.endBoxSelect();
+      } else {
+        panel.updateMarquee(screen, marqueeAdditive, marqueeBaseIds);
+        panel.controller.endBoxSelect();
+      }
+    } else {
+      endInteraction(panel);
+    }
     pointerId = null;
+    pointerStart = null;
     try {
       canvasEl.releasePointerCapture(event.pointerId);
     } catch {

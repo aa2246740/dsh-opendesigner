@@ -160,7 +160,8 @@ describe("Client - CanvasPanel & Unified Visual Viewport Engine", () => {
     assert.ok(html.includes("handle-nw"));
     assert.ok(html.includes("handle-se"));
     assert.ok(html.includes('data-testid="overlay-handle-e"'));
-    assert.ok(html.includes("<title>Resize se</title>"));
+    assert.ok(html.includes("<title>Resize bottom-right</title>"));
+    assert.ok(html.includes('data-tooltip="Resize bottom-right"'));
     assert.ok(html.includes("Hero Content"));
     assert.ok(html.includes("position:absolute"));
   });
@@ -233,6 +234,42 @@ describe("Client - CanvasPanel & Unified Visual Viewport Engine", () => {
     // 4. 移除新元素，再次验证状态保持
     panel.unregisterElement("badge_1");
     assert.deepEqual(panel.getElementRect("card_1"), { left: 60, top: 60, width: 150, height: 150 });
+  });
+
+  it("should rubber-band box-select intersecting elements without Shift", () => {
+    const panel = new CanvasPanel();
+    panel.registerElement("a", { left: 10, top: 10, width: 40, height: 40 });
+    panel.registerElement("b", { left: 80, top: 10, width: 40, height: 40 });
+    panel.registerElement("c", { left: 200, top: 10, width: 40, height: 40 });
+
+    panel.controller.startBoxSelect({ x: 0, y: 0 });
+    assert.equal(panel.controller.getMode(), "box-selecting");
+    const ids = panel.updateMarquee({ x: 130, y: 60 }, false, []);
+    assert.deepEqual([...ids].sort(), ["a", "b"]);
+    const html = panel.renderHtml();
+    assert.ok(html.includes('data-testid="marquee-band"'));
+    panel.controller.endBoxSelect();
+    assert.equal(panel.controller.getMode(), "idle");
+    assert.equal(panel.controller.getMarqueeRect(), null);
+    assert.deepEqual([...panel.selection.getSelectedIds()].sort(), ["a", "b"]);
+
+    panel.controller.startBoxSelect({ x: 0, y: 0 });
+    const union = panel.updateMarquee({ x: 130, y: 60 }, true, ["c"]);
+    panel.controller.endBoxSelect();
+    assert.deepEqual([...union].sort(), ["a", "b", "c"]);
+  });
+
+  it("should clamp live resize to 8×8 instead of 1px", () => {
+    const panel = new CanvasPanel();
+    panel.registerElement("tiny", { left: 40, top: 40, width: 80, height: 60 });
+    panel.select(["tiny"]);
+    panel.controller.startResize("se", { x: 120, y: 100 });
+    panel.resizeSelected({ x: -400, y: -400 });
+    panel.controller.endResize();
+    const rect = panel.getElementRect("tiny");
+    assert.ok(rect);
+    assert.equal(rect.width, 8);
+    assert.equal(rect.height, 8);
   });
 });
 

@@ -7,6 +7,7 @@
 import { FlatStore } from "../../store/flatStore.ts";
 import type { FEElement } from "../../store/flatStore.ts";
 import type { Point, Rect, ResizeHandle } from "../geometry.ts";
+import { rectsIntersect } from "../geometry.ts";
 import type { SnapGuide } from "../snapping.ts";
 import { SelectionManager } from "../selection.ts";
 import { ComponentSandbox } from "../sandbox.ts";
@@ -150,6 +151,23 @@ export class CanvasPanel {
     return bestId;
   }
 
+  public hitTestIntersecting(worldRect: Rect): string[] {
+    const ids: string[] = [];
+    for (const [id, rect] of this.elementRects.entries()) {
+      if (rectsIntersect(worldRect, rect)) ids.push(id);
+    }
+    return ids;
+  }
+
+  public updateMarquee(screenPoint: Point, additive: boolean, baseIds: string[]): string[] {
+    const marquee = this.controller.updateBoxSelect(screenPoint);
+    if (!marquee) return [];
+    const hit = this.hitTestIntersecting(marquee);
+    const merged = additive ? Array.from(new Set([...baseIds, ...hit])) : hit;
+    this.select(merged);
+    return merged;
+  }
+
   private persistRect(id: string, rect: Rect): void {
     this.elementRects.set(id, { ...rect });
     const el = this.store.getElement(id);
@@ -264,7 +282,9 @@ export class CanvasPanel {
     }
 
     // 渲染选区与吸附导引 SVG
-    const overlaySvg = this.overlay.renderSvgOverlay(box, guides);
+    const overlaySvg = this.overlay.renderSvgOverlay(box, guides, {
+      marquee: this.controller.getMarqueeRect()
+    });
 
     return [
       `<div class="opendesigner-canvas-container" data-testid="canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,

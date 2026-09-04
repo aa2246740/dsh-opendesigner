@@ -25,6 +25,20 @@ var OpenDesignerPreview = (() => {
   });
 
   // src/client/geometry.ts
+  var MIN_ELEMENT_SIZE = 8;
+  function rectFromPoints(a, b) {
+    const left = Math.min(a.x, b.x);
+    const top = Math.min(a.y, b.y);
+    return {
+      left,
+      top,
+      width: Math.abs(b.x - a.x),
+      height: Math.abs(b.y - a.y)
+    };
+  }
+  function rectsIntersect(a, b) {
+    return a.left < b.left + b.width && a.left + a.width > b.left && a.top < b.top + b.height && a.top + a.height > b.top;
+  }
   function worldToScreen(worldPoint, zoom, panX, panY) {
     return {
       x: worldPoint.x * zoom + panX,
@@ -75,8 +89,8 @@ var OpenDesignerPreview = (() => {
     }
   };
   function companionGeometry(start, handle, deltaWidth, deltaHeight) {
-    const width = Math.max(1, start.width + deltaWidth);
-    const height = Math.max(1, start.height + deltaHeight);
+    const width = Math.max(MIN_ELEMENT_SIZE, start.width + deltaWidth);
+    const height = Math.max(MIN_ELEMENT_SIZE, start.height + deltaHeight);
     return {
       width,
       height,
@@ -124,8 +138,8 @@ var OpenDesignerPreview = (() => {
         rect: {
           left: newGroupBox.left + relLeft * newGroupBox.width,
           top: newGroupBox.top + relTop * newGroupBox.height,
-          width: Math.max(1, relWidth * newGroupBox.width),
-          height: Math.max(1, relHeight * newGroupBox.height)
+          width: Math.max(MIN_ELEMENT_SIZE, relWidth * newGroupBox.width),
+          height: Math.max(MIN_ELEMENT_SIZE, relHeight * newGroupBox.height)
         }
       };
     });
@@ -310,6 +324,16 @@ var OpenDesignerPreview = (() => {
           );
         }
       }
+      const HANDLE_TOOLTIPS = {
+        nw: "Resize top-left",
+        n: "Resize top",
+        ne: "Resize top-right",
+        e: "Resize right",
+        se: "Resize bottom-right",
+        s: "Resize bottom",
+        sw: "Resize bottom-left",
+        w: "Resize left"
+      };
       if (box) {
         parts.push(
           `<rect x="${box.left}" y="${box.top}" width="${box.width}" height="${box.height}" fill="none" stroke="${this.strokeColor}" stroke-width="1.5" />`
@@ -317,13 +341,20 @@ var OpenDesignerPreview = (() => {
         const half = this.handleSize / 2;
         const handles = this.computeHandles(box);
         for (const h of handles) {
+          const tip = HANDLE_TOOLTIPS[h.handle] || `Resize ${h.handle}`;
           parts.push(
-            `<g class="resize-handle-group" data-handle="${h.handle}" data-testid="overlay-handle-${h.handle}" style="pointer-events:auto;cursor:${h.cursor};">
-            <title>Resize ${h.handle}</title>
+            `<g class="resize-handle-group" data-handle="${h.handle}" data-testid="overlay-handle-${h.handle}" data-tooltip="${tip}" style="pointer-events:auto;cursor:${h.cursor};">
+            <title>${tip}</title>
             <rect class="resize-handle handle-${h.handle}" x="${h.point.x - half}" y="${h.point.y - half}" width="${this.handleSize}" height="${this.handleSize}" fill="#ffffff" stroke="${this.strokeColor}" stroke-width="1.5" />
           </g>`
           );
         }
+      }
+      const marquee = options.marquee;
+      if (marquee && (marquee.width > 1 || marquee.height > 1)) {
+        parts.push(
+          `<rect class="marquee-band" data-testid="marquee-band" x="${marquee.left}" y="${marquee.top}" width="${marquee.width}" height="${marquee.height}" fill="rgba(96,165,250,0.16)" stroke="#60a5fa" stroke-width="1" stroke-dasharray="4 3" />`
+        );
       }
       parts.push(`</svg>`);
       return parts.join("\n");
@@ -337,6 +368,7 @@ var OpenDesignerPreview = (() => {
     selection;
     dragSession = null;
     currentGuides = [];
+    marqueeRect = null;
     // 事件回调列表
     onGuidesChangeCallbacks = [];
     onModeChangeCallbacks = [];
@@ -374,6 +406,36 @@ var OpenDesignerPreview = (() => {
       for (const cb of this.onGuidesChangeCallbacks) {
         cb(guides);
       }
+    }
+    getMarqueeRect() {
+      return this.marqueeRect ? { ...this.marqueeRect } : null;
+    }
+    /**
+     * Empty-canvas rubber-band. World-space rect is used for intersection hit-testing.
+     */
+    startBoxSelect(screenPoint) {
+      const worldP = this.viewport.toWorld(screenPoint);
+      this.setMode("box-selecting");
+      this.dragSession = {
+        startScreenPoint: { ...screenPoint },
+        startWorldPoint: worldP,
+        initialBox: { left: worldP.x, top: worldP.y, width: 0, height: 0 }
+      };
+      this.marqueeRect = { left: worldP.x, top: worldP.y, width: 0, height: 0 };
+    }
+    updateBoxSelect(screenPoint) {
+      if (this.mode !== "box-selecting" || !this.dragSession) return null;
+      const currentWorld = this.viewport.toWorld(screenPoint);
+      this.marqueeRect = rectFromPoints(this.dragSession.startWorldPoint, currentWorld);
+      return { ...this.marqueeRect };
+    }
+    endBoxSelect() {
+      if (this.mode !== "box-selecting") return null;
+      const rect = this.marqueeRect ? { ...this.marqueeRect } : null;
+      this.marqueeRect = null;
+      this.dragSession = null;
+      this.setMode("idle");
+      return rect;
     }
     /**
      * 启动画布平移
@@ -912,7 +974,7 @@ var OpenDesignerPreview = (() => {
       let newLeft = startBox.left;
       let newWidth = startBox.width;
       if (handle.includes("e")) {
-        const rawRight = startBox.left + Math.max(1, startBox.width + dx);
+        const rawRight = startBox.left + Math.max(MIN_ELEMENT_SIZE, startBox.width + dx);
         let bestRight = rawRight;
         let minDelta = Infinity;
         let snapGuide = null;
@@ -935,7 +997,7 @@ var OpenDesignerPreview = (() => {
           }
         }
         newLeft = startBox.left;
-        newWidth = Math.max(1, bestRight - startBox.left);
+        newWidth = Math.max(MIN_ELEMENT_SIZE, bestRight - startBox.left);
         if (snapGuide) {
           guides.push(snapGuide);
           snappedX = true;
@@ -943,7 +1005,7 @@ var OpenDesignerPreview = (() => {
       } else if (handle.includes("w")) {
         const fixedRight = startBox.left + startBox.width;
         const rawLeft = startBox.left + dx;
-        let bestLeft = Math.min(fixedRight - 1, rawLeft);
+        let bestLeft = Math.min(fixedRight - MIN_ELEMENT_SIZE, rawLeft);
         let minDelta = Infinity;
         let snapGuide = null;
         if (enableSnapping) {
@@ -953,7 +1015,7 @@ var OpenDesignerPreview = (() => {
               const diff = Math.abs(cx - rawLeft);
               if (diff <= snapThreshold && diff < minDelta) {
                 minDelta = diff;
-                bestLeft = Math.min(fixedRight - 1, cx);
+                bestLeft = Math.min(fixedRight - MIN_ELEMENT_SIZE, cx);
                 snapGuide = {
                   orientation: "vertical",
                   coordinate: cx,
@@ -965,7 +1027,7 @@ var OpenDesignerPreview = (() => {
           }
         }
         newLeft = bestLeft;
-        newWidth = Math.max(1, fixedRight - bestLeft);
+        newWidth = Math.max(MIN_ELEMENT_SIZE, fixedRight - bestLeft);
         if (snapGuide) {
           guides.push(snapGuide);
           snappedX = true;
@@ -974,7 +1036,7 @@ var OpenDesignerPreview = (() => {
       let newTop = startBox.top;
       let newHeight = startBox.height;
       if (handle.includes("s")) {
-        const rawBottom = startBox.top + Math.max(1, startBox.height + dy);
+        const rawBottom = startBox.top + Math.max(MIN_ELEMENT_SIZE, startBox.height + dy);
         let bestBottom = rawBottom;
         let minDelta = Infinity;
         let snapGuide = null;
@@ -997,7 +1059,7 @@ var OpenDesignerPreview = (() => {
           }
         }
         newTop = startBox.top;
-        newHeight = Math.max(1, bestBottom - startBox.top);
+        newHeight = Math.max(MIN_ELEMENT_SIZE, bestBottom - startBox.top);
         if (snapGuide) {
           guides.push(snapGuide);
           snappedY = true;
@@ -1005,7 +1067,7 @@ var OpenDesignerPreview = (() => {
       } else if (handle.includes("n")) {
         const fixedBottom = startBox.top + startBox.height;
         const rawTop = startBox.top + dy;
-        let bestTop = Math.min(fixedBottom - 1, rawTop);
+        let bestTop = Math.min(fixedBottom - MIN_ELEMENT_SIZE, rawTop);
         let minDelta = Infinity;
         let snapGuide = null;
         if (enableSnapping) {
@@ -1015,7 +1077,7 @@ var OpenDesignerPreview = (() => {
               const diff = Math.abs(cy - rawTop);
               if (diff <= snapThreshold && diff < minDelta) {
                 minDelta = diff;
-                bestTop = Math.min(fixedBottom - 1, cy);
+                bestTop = Math.min(fixedBottom - MIN_ELEMENT_SIZE, cy);
                 snapGuide = {
                   orientation: "horizontal",
                   coordinate: cy,
@@ -1027,7 +1089,7 @@ var OpenDesignerPreview = (() => {
           }
         }
         newTop = bestTop;
-        newHeight = Math.max(1, fixedBottom - bestTop);
+        newHeight = Math.max(MIN_ELEMENT_SIZE, fixedBottom - bestTop);
         if (snapGuide) {
           guides.push(snapGuide);
           snappedY = true;
@@ -1890,6 +1952,21 @@ var OpenDesignerPreview = (() => {
       }
       return bestId;
     }
+    hitTestIntersecting(worldRect) {
+      const ids = [];
+      for (const [id, rect] of this.elementRects.entries()) {
+        if (rectsIntersect(worldRect, rect)) ids.push(id);
+      }
+      return ids;
+    }
+    updateMarquee(screenPoint, additive, baseIds) {
+      const marquee = this.controller.updateBoxSelect(screenPoint);
+      if (!marquee) return [];
+      const hit = this.hitTestIntersecting(marquee);
+      const merged = additive ? Array.from(/* @__PURE__ */ new Set([...baseIds, ...hit])) : hit;
+      this.select(merged);
+      return merged;
+    }
     persistRect(id, rect) {
       this.elementRects.set(id, { ...rect });
       const el = this.store.getElement(id);
@@ -1979,7 +2056,9 @@ var OpenDesignerPreview = (() => {
       for (const rid of rootIds) {
         elementsHtml.push(this.sandbox.renderToHtml(this.store, rid));
       }
-      const overlaySvg = this.overlay.renderSvgOverlay(box, guides);
+      const overlaySvg = this.overlay.renderSvgOverlay(box, guides, {
+        marquee: this.controller.getMarqueeRect()
+      });
       return [
         `<div class="opendesigner-canvas-container" data-testid="canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
         `  <div class="canvas-viewport-layer" data-testid="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;width:100%;height:100%;">`,
@@ -1993,6 +2072,7 @@ var OpenDesignerPreview = (() => {
 
   // src/client/previewCanvasUx.ts
   var RESIZE_HANDLES = /* @__PURE__ */ new Set(["nw", "n", "ne", "e", "se", "s", "sw", "w"]);
+  var MARQUEE_CLICK_PX = 4;
   function canvasPointFromEvent(canvasEl, clientX, clientY) {
     const bounds = canvasEl.getBoundingClientRect();
     return { x: clientX - bounds.left, y: clientY - bounds.top };
@@ -2023,7 +2103,8 @@ var OpenDesignerPreview = (() => {
     if (host) {
       host.innerHTML = panel.overlay.renderSvgOverlay(
         panel.getSelectedBoundingBox(),
-        panel.controller.getGuides()
+        panel.controller.getGuides(),
+        { marquee: panel.controller.getMarqueeRect() }
       );
     }
     const layer = canvasEl.querySelector(".canvas-viewport-layer");
@@ -2036,12 +2117,75 @@ var OpenDesignerPreview = (() => {
     if (mode === "panning") panel.controller.endPan();
     else if (mode === "dragging") panel.controller.endDrag();
     else if (mode === "resizing") panel.controller.endResize();
+    else if (mode === "box-selecting") panel.controller.endBoxSelect();
+  }
+  function bindFloatingTooltips(root) {
+    let tip = root.querySelector("[data-testid='editor-tooltip']");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "od-float-tip";
+      tip.setAttribute("data-testid", "editor-tooltip");
+      tip.hidden = true;
+      root.appendChild(tip);
+    }
+    let hideTimer = 0;
+    const show = (text, x, y) => {
+      window.clearTimeout(hideTimer);
+      tip.hidden = false;
+      tip.textContent = text;
+      const pad = 12;
+      const maxX = window.innerWidth - tip.offsetWidth - 8;
+      const maxY = window.innerHeight - tip.offsetHeight - 8;
+      tip.style.left = `${Math.max(8, Math.min(maxX, x + pad))}px`;
+      tip.style.top = `${Math.max(8, Math.min(maxY, y + pad))}px`;
+    };
+    const hide = () => {
+      hideTimer = window.setTimeout(() => {
+        tip.hidden = true;
+        tip.textContent = "";
+      }, 80);
+    };
+    const onOver = (event) => {
+      const target = event.target;
+      const el = target?.closest?.("[data-tooltip]");
+      if (!el) {
+        hide();
+        return;
+      }
+      const text = el.getAttribute("data-tooltip");
+      if (!text) {
+        hide();
+        return;
+      }
+      show(text, event.clientX, event.clientY);
+    };
+    const onMove = (event) => {
+      if (tip.hidden) return;
+      const el = event.target?.closest?.("[data-tooltip]");
+      if (el) show(el.getAttribute("data-tooltip") || "", event.clientX, event.clientY);
+    };
+    const onOut = (event) => {
+      const next = event.relatedTarget;
+      if (next && root.contains(next) && next.closest("[data-tooltip]")) return;
+      hide();
+    };
+    root.addEventListener("pointerover", onOver);
+    root.addEventListener("pointermove", onMove);
+    root.addEventListener("pointerout", onOut);
+    return () => {
+      root.removeEventListener("pointerover", onOver);
+      root.removeEventListener("pointermove", onMove);
+      root.removeEventListener("pointerout", onOut);
+    };
   }
   function bindPreviewCanvasUx(canvasEl, panel, store, hooks) {
     let spaceDown = false;
     let pointerId = null;
     let didMutate = false;
     let commitLabel = "canvas-gesture";
+    let marqueeAdditive = false;
+    let marqueeBaseIds = [];
+    let pointerStart = null;
     const liveSync = () => {
       applyRectsToDom(canvasEl, panel, store);
       refreshOverlay(canvasEl, panel);
@@ -2057,6 +2201,7 @@ var OpenDesignerPreview = (() => {
       canvasEl.focus({ preventScroll: true });
       event.preventDefault();
       pointerId = event.pointerId;
+      pointerStart = { ...screen };
       try {
         canvasEl.setPointerCapture(event.pointerId);
       } catch {
@@ -2068,13 +2213,18 @@ var OpenDesignerPreview = (() => {
         liveSync();
         return;
       }
-      const panRequested = event.button === 1 || spaceDown || event.altKey || !nodeId;
+      const panRequested = event.button === 1 || spaceDown || event.altKey;
       if (panRequested) {
-        if (!nodeId && !event.shiftKey && event.button === 0 && !spaceDown) {
-          panel.selection.clearSelection();
-        }
         panel.controller.startPan(screen);
         commitLabel = "pan";
+        liveSync();
+        return;
+      }
+      if (!nodeId) {
+        marqueeAdditive = event.shiftKey;
+        marqueeBaseIds = marqueeAdditive ? panel.selection.getSelectedIds() : [];
+        panel.controller.startBoxSelect(screen);
+        commitLabel = "marquee";
         liveSync();
         return;
       }
@@ -2099,6 +2249,11 @@ var OpenDesignerPreview = (() => {
         hooks.onHud();
         return;
       }
+      if (mode === "box-selecting") {
+        panel.updateMarquee(screen, marqueeAdditive, marqueeBaseIds);
+        liveSync();
+        return;
+      }
       if (mode === "dragging") {
         const res = panel.moveSelected(screen);
         if (res) didMutate = true;
@@ -2114,8 +2269,23 @@ var OpenDesignerPreview = (() => {
     const onPointerUp = (event) => {
       if (pointerId === null || event.pointerId !== pointerId) return;
       const mode = panel.controller.getMode();
-      endInteraction(panel);
+      const screen = canvasPointFromEvent(canvasEl, event.clientX, event.clientY);
+      if (mode === "box-selecting") {
+        const dx = pointerStart ? screen.x - pointerStart.x : 0;
+        const dy = pointerStart ? screen.y - pointerStart.y : 0;
+        const dist = Math.hypot(dx, dy);
+        if (dist < MARQUEE_CLICK_PX) {
+          if (!marqueeAdditive) panel.selection.clearSelection();
+          panel.controller.endBoxSelect();
+        } else {
+          panel.updateMarquee(screen, marqueeAdditive, marqueeBaseIds);
+          panel.controller.endBoxSelect();
+        }
+      } else {
+        endInteraction(panel);
+      }
       pointerId = null;
+      pointerStart = null;
       try {
         canvasEl.releasePointerCapture(event.pointerId);
       } catch {
@@ -2271,7 +2441,7 @@ var OpenDesignerPreview = (() => {
   function swatchButtons(prefix, values, kind) {
     return values.map((value) => {
       const colorClass = kind === "bg" ? `bg-${value}` : `bg-${value}`;
-      return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" title="${value}"></button>`;
+      return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" data-tooltip="${kind === "bg" ? "Fill" : "Text"} ${value}"></button>`;
     }).join("");
   }
   function mountPreview(root, api = {}) {
@@ -2303,14 +2473,15 @@ var OpenDesignerPreview = (() => {
         <aside class="od-layers" data-testid="layer-tree"></aside>
         <div class="od-canvas-col">
           <div class="od-canvas-toolbar" data-testid="canvas-toolbar">
-            <button type="button" data-testid="zoom-out" id="od-zoom-out" title="Zoom out">\u2212</button>
-            <span class="od-zoom-label" data-testid="zoom-label" id="od-zoom-label" title="Current zoom">100%</span>
-            <button type="button" data-testid="zoom-in" id="od-zoom-in" title="Zoom in">+</button>
-            <button type="button" data-testid="zoom-reset" id="od-zoom-reset" title="Reset pan and zoom">Reset view</button>
-            <button type="button" data-testid="insert-box" id="od-insert-box" title="Insert a sibling box">Insert box</button>
-            <button type="button" data-testid="delete-element" id="od-delete-element" title="Delete selected">Delete</button>
+            <button type="button" data-testid="zoom-out" id="od-zoom-out" data-tooltip="Zoom out">\u2212</button>
+            <span class="od-zoom-label" data-testid="zoom-label" id="od-zoom-label" data-tooltip="Current zoom">100%</span>
+            <button type="button" data-testid="zoom-in" id="od-zoom-in" data-tooltip="Zoom in">+</button>
+            <button type="button" data-testid="zoom-reset" id="od-zoom-reset" data-tooltip="Reset pan and zoom">Reset view</button>
+            <button type="button" data-testid="insert-box" id="od-insert-box" data-tooltip="Insert a sibling box">Insert box</button>
+            <button type="button" data-testid="delete-element" id="od-delete-element" data-tooltip="Delete selected">Delete</button>
             <span class="od-hud" data-testid="canvas-hud" id="od-hud">idle</span>
           </div>
+          <div class="od-hint" data-testid="editor-hint">Drag empty canvas to marquee-select \xB7 Space-drag or middle-drag to pan \xB7 Wheel pans \xB7 Ctrl+wheel zooms at cursor \xB7 Min size 8\xD78</div>
           <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
         </div>
         <aside class="od-styles">
@@ -2318,26 +2489,28 @@ var OpenDesignerPreview = (() => {
           <div id="od-selected" class="od-mono" data-testid="selected-id"></div>
           <div id="od-inspector" class="od-inspector" data-testid="styles-inspector"></div>
           <div class="od-actions">
-            <button type="button" data-testid="edit-fill" id="od-edit-fill" title="Fill emerald shortcut">Fill emerald</button>
-            <button type="button" data-testid="edit-radius" id="od-edit-radius" title="Radius xl shortcut">Radius xl</button>
-            <button type="button" data-testid="ai-merge" id="od-ai-merge">AI merge</button>
+            <button type="button" data-testid="edit-fill" id="od-edit-fill" data-tooltip="Fill emerald shortcut">Fill emerald</button>
+            <button type="button" data-testid="edit-radius" id="od-edit-radius" data-tooltip="Radius xl shortcut">Radius xl</button>
+            <button type="button" data-testid="ai-merge" id="od-ai-merge" data-tooltip="AI merge: live provider, then offline mock if the network fails">AI merge</button>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
           <div class="od-actions">
-            <button type="button" data-testid="rewind" id="od-rewind">Rewind</button>
-            <button type="button" data-testid="apply-project" id="od-apply-project">Save / Apply to project</button>
+            <button type="button" data-testid="rewind" id="od-rewind" data-tooltip="Rewind one checkpoint">Rewind</button>
+            <button type="button" data-testid="apply-project" id="od-apply-project" data-tooltip="Save working copy to the project">Save / Apply to project</button>
           </div>
           <div class="od-styles-title">Agent batch</div>
           <div class="od-actions">
-            <button type="button" data-testid="batch-create" id="od-batch-create">Create batch</button>
-            <button type="button" data-testid="batch-write" id="od-batch-write">Write batch file</button>
-            <button type="button" data-testid="batch-apply" id="od-batch-apply">Apply batch</button>
-            <button type="button" data-testid="batch-discard" id="od-batch-discard">Discard batch</button>
+            <button type="button" data-testid="batch-create" id="od-batch-create" data-tooltip="Create an isolated agent worktree">Create batch</button>
+            <button type="button" data-testid="batch-write" id="od-batch-write" data-tooltip="Write a jailed file inside the batch worktree">Write batch file</button>
+            <button type="button" data-testid="batch-apply" id="od-batch-apply" data-tooltip="Apply the agent worktree to the project">Apply batch</button>
+            <button type="button" data-testid="batch-discard" id="od-batch-discard" data-tooltip="Discard the agent worktree">Discard batch</button>
           </div>
           <pre id="od-persist" class="od-mono" data-testid="persist-log">persistence idle</pre>
           <pre id="od-class" class="od-mono" data-testid="class-output"></pre>
           <pre id="od-ai" class="od-mono" data-testid="ai-output"></pre>
+          <div class="od-styles-title">Stubs</div>
+          <div class="od-hint" data-testid="stub-note">get_theme, search_icons, and set_icon_library are stubs. They are not implemented in this preview.</div>
         </aside>
       </div>
     </div>
@@ -2383,11 +2556,11 @@ var OpenDesignerPreview = (() => {
       </div>
       <div class="od-field">
         <div class="od-field-label">Radius ${parsed.borderRadius || ""}</div>
-        <div class="od-chip-row">${RADIUS_VALUES.map((value) => `<button type="button" data-testid="style-radius-${value}" data-radius="${value}">${value}</button>`).join("")}</div>
+        <div class="od-chip-row">${RADIUS_VALUES.map((value) => `<button type="button" data-testid="style-radius-${value}" data-radius="${value}" data-tooltip="Border radius ${value}">${value}</button>`).join("")}</div>
       </div>
       <div class="od-field">
         <div class="od-field-label">Padding ${parsed.padding || parsed.paddingX || ""}</div>
-        <div class="od-chip-row">${PADDING_VALUES.map((value) => `<button type="button" data-testid="style-padding-${value}" data-padding="${value}">p-${value}</button>`).join("")}</div>
+        <div class="od-chip-row">${PADDING_VALUES.map((value) => `<button type="button" data-testid="style-padding-${value}" data-padding="${value}" data-tooltip="Padding p-${value}">p-${value}</button>`).join("")}</div>
       </div>
       <div class="od-field">
         <div class="od-field-label">Text color ${parsed.textColor || ""}</div>
@@ -2569,10 +2742,13 @@ var OpenDesignerPreview = (() => {
       if (result.success && result.mergedCode) {
         const match = result.mergedCode.match(/className="([^"]*)"/);
         if (match) setClassName(store, id, match[1]);
-        aiEl.textContent = `model=${result.model || "unknown"}
+        const live = result.fallback ? `live failed: ${result.liveError || "provider error"}
+fallback=mock-offline` : `live ok mockMode=${result.mockMode === true}`;
+        aiEl.textContent = `${live}
+model=${result.model || "unknown"}
 ${result.mergedCode}`;
         render();
-        void checkpointAndAutosave("ai-merge");
+        void checkpointAndAutosave(result.fallback ? "ai-merge-mock" : "ai-merge");
       } else {
         aiEl.textContent = result.error || "AI merge failed";
       }
@@ -2600,6 +2776,7 @@ ${result.mergedCode}`;
         updateHud();
       }
     });
+    bindFloatingTooltips(root);
     window.setInterval(() => {
       if (!dirty) return;
       dirty = false;

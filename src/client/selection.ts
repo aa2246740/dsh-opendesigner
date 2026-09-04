@@ -3,7 +3,7 @@
  * 深度联动 companionGeometry 伴随几何缩放与 6 线智能吸附
  */
 
-import { companionGeometry, computeBoundingBox, multiResize } from "./geometry.ts";
+import { companionGeometry, computeBoundingBox, MIN_ELEMENT_SIZE, multiResize } from "./geometry.ts";
 import type { Point, Rect, ResizeHandle } from "./geometry.ts";
 import { compute6LineSnapping } from "./snapping.ts";
 import type { SnapGuide, SnapResult } from "./snapping.ts";
@@ -158,7 +158,7 @@ export class SelectionManager {
 
     if (handle.includes("e")) {
       // 东侧手柄：左边缘固定，右边缘随鼠标移动
-      const rawRight = startBox.left + Math.max(1, startBox.width + dx);
+      const rawRight = startBox.left + Math.max(MIN_ELEMENT_SIZE, startBox.width + dx);
       let bestRight = rawRight;
       let minDelta = Infinity;
       let snapGuide: SnapGuide | null = null;
@@ -183,7 +183,7 @@ export class SelectionManager {
       }
 
       newLeft = startBox.left;
-      newWidth = Math.max(1, bestRight - startBox.left);
+      newWidth = Math.max(MIN_ELEMENT_SIZE, bestRight - startBox.left);
       if (snapGuide) {
         guides.push(snapGuide);
         snappedX = true;
@@ -192,7 +192,7 @@ export class SelectionManager {
       // 西侧手柄：右边缘固定，左边缘随鼠标移动
       const fixedRight = startBox.left + startBox.width;
       const rawLeft = startBox.left + dx;
-      let bestLeft = Math.min(fixedRight - 1, rawLeft);
+      let bestLeft = Math.min(fixedRight - MIN_ELEMENT_SIZE, rawLeft);
       let minDelta = Infinity;
       let snapGuide: SnapGuide | null = null;
 
@@ -203,7 +203,7 @@ export class SelectionManager {
             const diff = Math.abs(cx - rawLeft);
             if (diff <= snapThreshold && diff < minDelta) {
               minDelta = diff;
-              bestLeft = Math.min(fixedRight - 1, cx);
+              bestLeft = Math.min(fixedRight - MIN_ELEMENT_SIZE, cx);
               snapGuide = {
                 orientation: "vertical",
                 coordinate: cx,
@@ -216,7 +216,7 @@ export class SelectionManager {
       }
 
       newLeft = bestLeft;
-      newWidth = Math.max(1, fixedRight - bestLeft);
+      newWidth = Math.max(MIN_ELEMENT_SIZE, fixedRight - bestLeft);
       if (snapGuide) {
         guides.push(snapGuide);
         snappedX = true;
@@ -229,7 +229,7 @@ export class SelectionManager {
 
     if (handle.includes("s")) {
       // 南侧手柄：顶边缘固定，底边缘随鼠标移动
-      const rawBottom = startBox.top + Math.max(1, startBox.height + dy);
+      const rawBottom = startBox.top + Math.max(MIN_ELEMENT_SIZE, startBox.height + dy);
       let bestBottom = rawBottom;
       let minDelta = Infinity;
       let snapGuide: SnapGuide | null = null;
@@ -254,7 +254,7 @@ export class SelectionManager {
       }
 
       newTop = startBox.top;
-      newHeight = Math.max(1, bestBottom - startBox.top);
+      newHeight = Math.max(MIN_ELEMENT_SIZE, bestBottom - startBox.top);
       if (snapGuide) {
         guides.push(snapGuide);
         snappedY = true;
@@ -263,7 +263,7 @@ export class SelectionManager {
       // 北侧手柄：底边缘固定，顶边缘随鼠标移动
       const fixedBottom = startBox.top + startBox.height;
       const rawTop = startBox.top + dy;
-      let bestTop = Math.min(fixedBottom - 1, rawTop);
+      let bestTop = Math.min(fixedBottom - MIN_ELEMENT_SIZE, rawTop);
       let minDelta = Infinity;
       let snapGuide: SnapGuide | null = null;
 
@@ -274,7 +274,7 @@ export class SelectionManager {
             const diff = Math.abs(cy - rawTop);
             if (diff <= snapThreshold && diff < minDelta) {
               minDelta = diff;
-              bestTop = Math.min(fixedBottom - 1, cy);
+              bestTop = Math.min(fixedBottom - MIN_ELEMENT_SIZE, cy);
               snapGuide = {
                 orientation: "horizontal",
                 coordinate: cy,
@@ -287,7 +287,7 @@ export class SelectionManager {
       }
 
       newTop = bestTop;
-      newHeight = Math.max(1, fixedBottom - bestTop);
+      newHeight = Math.max(MIN_ELEMENT_SIZE, fixedBottom - bestTop);
       if (snapGuide) {
         guides.push(snapGuide);
         snappedY = true;

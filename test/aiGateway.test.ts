@@ -283,6 +283,31 @@ Hope this helps!`;
     assert.ok(res.reasoning?.includes("Checking theme colors"));
   });
 
+  it("falls back to mock-offline and patches className when live HTTP 503 and fallbackToMock is set", async () => {
+    const mockFetch = async () =>
+      new Response("provider unavailable", { status: 503, headers: { "Content-Type": "text/plain" } });
+
+    const gateway = new AIGateway({
+      provider: "deepseek",
+      apiKey: "sk-mock-key",
+      fetchFn: mockFetch as any,
+      mockMode: false
+    });
+
+    const source = `export const Box = () => <button className="px-4 py-2">Build</button>;`;
+    const res = await gateway.generateAndApply(
+      { sourceCode: source, instruction: "Add shadow-lg to the button className" },
+      { fallbackToMock: true, maxRetries: 0 }
+    );
+
+    assert.equal(res.success, true);
+    assert.equal(res.fallback, true);
+    assert.equal(res.model, "mock-offline");
+    assert.ok(res.liveError?.includes("HTTP 503"));
+    assert.ok(res.mergedCode?.includes("shadow-lg"));
+    assert.ok(res.mergedCode?.includes('className="px-4 py-2 shadow-lg"'));
+  });
+
   it("detects Gemini before OpenRouter and never returns the key in status()", () => {
     const gemini = detectAiConfigFromEnv({
       GEMINI_API_KEY: "secret-gemini",

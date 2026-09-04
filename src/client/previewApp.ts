@@ -2,7 +2,7 @@ import { CanvasPanel } from "./canvas/index.ts";
 import { FlatStore } from "../store/flatStore.ts";
 import { StylesPanelManager, type ParsedStyles } from "./stylesPanel.ts";
 import { mergeTailwindClasses } from "../compiler/tailwindMerge.ts";
-import { bindPreviewCanvasUx, refreshOverlay } from "./previewCanvasUx.ts";
+import { bindPreviewCanvasUx, bindFloatingTooltips, refreshOverlay } from "./previewCanvasUx.ts";
 
 export interface PreviewApi {
   getStatus?: () => Promise<Record<string, unknown>>;
@@ -12,7 +12,15 @@ export interface PreviewApi {
   applyAiMerge?: (
     source: string,
     instruction: string
-  ) => Promise<{ success: boolean; mergedCode?: string; error?: string; model?: string }>;
+  ) => Promise<{
+    success: boolean;
+    mergedCode?: string;
+    error?: string;
+    model?: string;
+    fallback?: boolean;
+    liveError?: string;
+    mockMode?: boolean;
+  }>;
 }
 
 const CARD_ID = "hero-card";
@@ -104,7 +112,7 @@ function swatchButtons(prefix: string, values: string[], kind: "bg" | "text"): s
   return values
     .map((value) => {
       const colorClass = kind === "bg" ? `bg-${value}` : `bg-${value}`;
-      return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" title="${value}"></button>`;
+      return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" data-tooltip="${kind === "bg" ? "Fill" : "Text"} ${value}"></button>`;
     })
     .join("");
 }
@@ -141,14 +149,15 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
         <aside class="od-layers" data-testid="layer-tree"></aside>
         <div class="od-canvas-col">
           <div class="od-canvas-toolbar" data-testid="canvas-toolbar">
-            <button type="button" data-testid="zoom-out" id="od-zoom-out" title="Zoom out">−</button>
-            <span class="od-zoom-label" data-testid="zoom-label" id="od-zoom-label" title="Current zoom">100%</span>
-            <button type="button" data-testid="zoom-in" id="od-zoom-in" title="Zoom in">+</button>
-            <button type="button" data-testid="zoom-reset" id="od-zoom-reset" title="Reset pan and zoom">Reset view</button>
-            <button type="button" data-testid="insert-box" id="od-insert-box" title="Insert a sibling box">Insert box</button>
-            <button type="button" data-testid="delete-element" id="od-delete-element" title="Delete selected">Delete</button>
+            <button type="button" data-testid="zoom-out" id="od-zoom-out" data-tooltip="Zoom out">−</button>
+            <span class="od-zoom-label" data-testid="zoom-label" id="od-zoom-label" data-tooltip="Current zoom">100%</span>
+            <button type="button" data-testid="zoom-in" id="od-zoom-in" data-tooltip="Zoom in">+</button>
+            <button type="button" data-testid="zoom-reset" id="od-zoom-reset" data-tooltip="Reset pan and zoom">Reset view</button>
+            <button type="button" data-testid="insert-box" id="od-insert-box" data-tooltip="Insert a sibling box">Insert box</button>
+            <button type="button" data-testid="delete-element" id="od-delete-element" data-tooltip="Delete selected">Delete</button>
             <span class="od-hud" data-testid="canvas-hud" id="od-hud">idle</span>
           </div>
+          <div class="od-hint" data-testid="editor-hint">Drag empty canvas to marquee-select · Space-drag or middle-drag to pan · Wheel pans · Ctrl+wheel zooms at cursor · Min size 8×8</div>
           <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
         </div>
         <aside class="od-styles">
@@ -156,26 +165,28 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
           <div id="od-selected" class="od-mono" data-testid="selected-id"></div>
           <div id="od-inspector" class="od-inspector" data-testid="styles-inspector"></div>
           <div class="od-actions">
-            <button type="button" data-testid="edit-fill" id="od-edit-fill" title="Fill emerald shortcut">Fill emerald</button>
-            <button type="button" data-testid="edit-radius" id="od-edit-radius" title="Radius xl shortcut">Radius xl</button>
-            <button type="button" data-testid="ai-merge" id="od-ai-merge">AI merge</button>
+            <button type="button" data-testid="edit-fill" id="od-edit-fill" data-tooltip="Fill emerald shortcut">Fill emerald</button>
+            <button type="button" data-testid="edit-radius" id="od-edit-radius" data-tooltip="Radius xl shortcut">Radius xl</button>
+            <button type="button" data-testid="ai-merge" id="od-ai-merge" data-tooltip="AI merge: live provider, then offline mock if the network fails">AI merge</button>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
           <div class="od-actions">
-            <button type="button" data-testid="rewind" id="od-rewind">Rewind</button>
-            <button type="button" data-testid="apply-project" id="od-apply-project">Save / Apply to project</button>
+            <button type="button" data-testid="rewind" id="od-rewind" data-tooltip="Rewind one checkpoint">Rewind</button>
+            <button type="button" data-testid="apply-project" id="od-apply-project" data-tooltip="Save working copy to the project">Save / Apply to project</button>
           </div>
           <div class="od-styles-title">Agent batch</div>
           <div class="od-actions">
-            <button type="button" data-testid="batch-create" id="od-batch-create">Create batch</button>
-            <button type="button" data-testid="batch-write" id="od-batch-write">Write batch file</button>
-            <button type="button" data-testid="batch-apply" id="od-batch-apply">Apply batch</button>
-            <button type="button" data-testid="batch-discard" id="od-batch-discard">Discard batch</button>
+            <button type="button" data-testid="batch-create" id="od-batch-create" data-tooltip="Create an isolated agent worktree">Create batch</button>
+            <button type="button" data-testid="batch-write" id="od-batch-write" data-tooltip="Write a jailed file inside the batch worktree">Write batch file</button>
+            <button type="button" data-testid="batch-apply" id="od-batch-apply" data-tooltip="Apply the agent worktree to the project">Apply batch</button>
+            <button type="button" data-testid="batch-discard" id="od-batch-discard" data-tooltip="Discard the agent worktree">Discard batch</button>
           </div>
           <pre id="od-persist" class="od-mono" data-testid="persist-log">persistence idle</pre>
           <pre id="od-class" class="od-mono" data-testid="class-output"></pre>
           <pre id="od-ai" class="od-mono" data-testid="ai-output"></pre>
+          <div class="od-styles-title">Stubs</div>
+          <div class="od-hint" data-testid="stub-note">get_theme, search_icons, and set_icon_library are stubs. They are not implemented in this preview.</div>
         </aside>
       </div>
     </div>
@@ -227,11 +238,11 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       </div>
       <div class="od-field">
         <div class="od-field-label">Radius ${parsed.borderRadius || ""}</div>
-        <div class="od-chip-row">${RADIUS_VALUES.map((value) => `<button type="button" data-testid="style-radius-${value}" data-radius="${value}">${value}</button>`).join("")}</div>
+        <div class="od-chip-row">${RADIUS_VALUES.map((value) => `<button type="button" data-testid="style-radius-${value}" data-radius="${value}" data-tooltip="Border radius ${value}">${value}</button>`).join("")}</div>
       </div>
       <div class="od-field">
         <div class="od-field-label">Padding ${parsed.padding || parsed.paddingX || ""}</div>
-        <div class="od-chip-row">${PADDING_VALUES.map((value) => `<button type="button" data-testid="style-padding-${value}" data-padding="${value}">p-${value}</button>`).join("")}</div>
+        <div class="od-chip-row">${PADDING_VALUES.map((value) => `<button type="button" data-testid="style-padding-${value}" data-padding="${value}" data-tooltip="Padding p-${value}">p-${value}</button>`).join("")}</div>
       </div>
       <div class="od-field">
         <div class="od-field-label">Text color ${parsed.textColor || ""}</div>
@@ -439,9 +450,12 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     if (result.success && result.mergedCode) {
       const match = result.mergedCode.match(/className="([^"]*)"/);
       if (match) setClassName(store, id, match[1]);
-      aiEl.textContent = `model=${result.model || "unknown"}\n${result.mergedCode}`;
+      const live = result.fallback
+        ? `live failed: ${result.liveError || "provider error"}\nfallback=mock-offline`
+        : `live ok mockMode=${result.mockMode === true}`;
+      aiEl.textContent = `${live}\nmodel=${result.model || "unknown"}\n${result.mergedCode}`;
       render();
-      void checkpointAndAutosave("ai-merge");
+      void checkpointAndAutosave(result.fallback ? "ai-merge-mock" : "ai-merge");
     } else {
       aiEl.textContent = result.error || "AI merge failed";
     }
@@ -471,6 +485,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       updateHud();
     }
   });
+  bindFloatingTooltips(root);
 
   window.setInterval(() => {
     if (!dirty) return;
