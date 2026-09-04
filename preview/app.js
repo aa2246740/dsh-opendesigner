@@ -2070,7 +2070,9 @@ var OpenDesignerPreview = (() => {
         await api.pushCanvas(store.toJSON());
       }
       const result = await api.callTool(tool, args);
-      persistEl.textContent = JSON.stringify(result, null, 2);
+      const shown = { ...result };
+      if (shown.store) shown.store = { restored: true };
+      persistEl.textContent = JSON.stringify(shown, null, 2);
       await refreshStatus();
       return result;
     }
