@@ -7,7 +7,7 @@
 import { SAVE_TO_CODE_JSON_SCHEMA, applySurgicalEdits } from "../compiler/aiMerge.ts";
 import type { CodePatchEdit } from "../compiler/aiMerge.ts";
 
-export type AIProvider = "deepseek" | "openai" | "ollama" | "custom";
+export type AIProvider = "deepseek" | "openai" | "ollama" | "custom" | "openrouter" | "gemini" | "minimax";
 
 export interface AIGatewayConfig {
   provider?: AIProvider;
@@ -51,7 +51,7 @@ export const DEEPSEEK_MODELS = {
 export const PROVIDER_DEFAULTS: Record<AIProvider, { baseURL: string; defaultModel: string }> = {
   deepseek: {
     baseURL: "https://api.deepseek.com/v1",
-    defaultModel: DEEPSEEK_MODELS.V3 // DeepSeek-V3
+    defaultModel: DEEPSEEK_MODELS.V3
   },
   openai: {
     baseURL: "https://api.openai.com/v1",
@@ -61,11 +61,67 @@ export const PROVIDER_DEFAULTS: Record<AIProvider, { baseURL: string; defaultMod
     baseURL: "http://localhost:11434/v1",
     defaultModel: "qwen2.5-coder:latest"
   },
+  openrouter: {
+    baseURL: "https://openrouter.ai/api/v1",
+    defaultModel: "openai/gpt-oss-20b:free"
+  },
+  gemini: {
+    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+    defaultModel: "gemini-2.0-flash"
+  },
+  minimax: {
+    baseURL: "https://api.minimaxi.com/v1",
+    defaultModel: "MiniMax-Text-01"
+  },
   custom: {
-    baseURL: "http://localhost:8000/v1",
+    baseURL: "http://127.0.0.1:8000/v1",
     defaultModel: "default-model"
   }
 };
+
+export function detectAiConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Partial<AIGatewayConfig> {
+  if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY) {
+    return {
+      provider: "gemini",
+      apiKey: env.GEMINI_API_KEY || env.GOOGLE_API_KEY,
+      baseURL: PROVIDER_DEFAULTS.gemini.baseURL,
+      model: env.GEMINI_MODEL || PROVIDER_DEFAULTS.gemini.defaultModel
+    };
+  }
+  if (env.OPENROUTER_ONLYUSE_FREEMODEL_API_KEY || env.OPENROUTER_API_KEY) {
+    return {
+      provider: "openrouter",
+      apiKey: env.OPENROUTER_ONLYUSE_FREEMODEL_API_KEY || env.OPENROUTER_API_KEY,
+      baseURL: PROVIDER_DEFAULTS.openrouter.baseURL,
+      model: env.OPENROUTER_MODEL || PROVIDER_DEFAULTS.openrouter.defaultModel
+    };
+  }
+  if (env.MINIMAXCN_API_KEY || env.MINIMAX_CN_API_KEY) {
+    return {
+      provider: "minimax",
+      apiKey: env.MINIMAXCN_API_KEY || env.MINIMAX_CN_API_KEY,
+      baseURL: env.MINIMAX_BASE_URL || PROVIDER_DEFAULTS.minimax.baseURL,
+      model: env.MINIMAX_MODEL || PROVIDER_DEFAULTS.minimax.defaultModel
+    };
+  }
+  if (env.DEEPSEEK_API_KEY) {
+    return {
+      provider: "deepseek",
+      apiKey: env.DEEPSEEK_API_KEY,
+      baseURL: PROVIDER_DEFAULTS.deepseek.baseURL,
+      model: env.DEEPSEEK_MODEL || PROVIDER_DEFAULTS.deepseek.defaultModel
+    };
+  }
+  if (env.OPENAI_API_KEY) {
+    return {
+      provider: "openai",
+      apiKey: env.OPENAI_API_KEY,
+      baseURL: PROVIDER_DEFAULTS.openai.baseURL,
+      model: env.OPENAI_MODEL || PROVIDER_DEFAULTS.openai.defaultModel
+    };
+  }
+  return {};
+}
 
 export class AIGateway {
   public provider: AIProvider;
@@ -83,11 +139,21 @@ export class AIGateway {
 
     this.baseURL = config.baseURL || defaults.baseURL;
     this.model = config.model || defaults.defaultModel;
-    this.apiKey = config.apiKey || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || "";
+    this.apiKey = config.apiKey || "";
     this.temperature = config.temperature ?? 0.2;
     this.maxTokens = config.maxTokens ?? 4096;
     this.fetchFn = config.fetchFn || (typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : (async () => {}) as any);
-    this.mockMode = config.mockMode ?? (!this.apiKey && !config.baseURL);
+    this.mockMode = config.mockMode ?? !this.apiKey;
+  }
+
+  public status(): { provider: AIProvider; model: string; baseURL: string; mockMode: boolean; hasApiKey: boolean } {
+    return {
+      provider: this.provider,
+      model: this.model,
+      baseURL: this.baseURL,
+      mockMode: this.mockMode,
+      hasApiKey: Boolean(this.apiKey)
+    };
   }
 
   /**

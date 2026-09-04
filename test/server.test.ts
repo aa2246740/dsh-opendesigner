@@ -22,7 +22,11 @@ describe("Server - OpenDesignerService & Persistence", () => {
   });
 
   it("should atomically save and reload canvas store", async () => {
-    const service = new OpenDesignerService({ projectRoot: TEST_DIR });
+    const service = new OpenDesignerService({
+      projectRoot: TEST_DIR,
+      autoApprove: true,
+      screenshotMode: "jsx-svg"
+    });
     service.store.setElement({
       id: "node_save_test",
       type: "element",
@@ -117,7 +121,11 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
 
   before(async () => {
     await fs.mkdir(TEST_DIR, { recursive: true });
-    service = new OpenDesignerService({ projectRoot: TEST_DIR });
+    service = new OpenDesignerService({
+      projectRoot: TEST_DIR,
+      autoApprove: true,
+      screenshotMode: "jsx-svg"
+    });
     await service.init();
   });
 
@@ -188,7 +196,8 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     // 6. Screenshot inspection
     const shotRes = await service.executeTool("take_screenshot", { elementId: rootId });
     assert.equal(shotRes.success, true);
-    assert.ok(shotRes.screenshotDataUrl.startsWith("data:image/png"));
+    assert.ok(shotRes.screenshotDataUrl.startsWith("data:image/svg+xml"));
+    assert.equal(shotRes.kind, "jsx-svg");
 
     // 7. Release now succeeds
     const verifiedRelease = await service.executeTool("canvas_release", { claim_id: claimId });
@@ -282,7 +291,54 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     const skills = await service.executeTool("list_skills");
     assert.equal(skills.skills.length, 3);
 
-    const skillDoc = await service.executeTool("read_skill", { name: "lunagraph-design" });
-    assert.ok(skillDoc.content.includes("lunagraph-design"));
+    const skillDoc = await service.executeTool("read_skill", { name: "opendesigner-design" });
+    assert.ok(skillDoc.content.includes("opendesigner-design"));
+  });
+
+  it("rejects filesystem escape and default-deny destructive writes", async () => {
+    const jailed = new OpenDesignerService({ projectRoot: TEST_DIR, autoApprove: false });
+    const abs = await jailed.executeTool("project_read", { path: "/etc/passwd" });
+    assert.equal(abs.success, false);
+    assert.equal(abs.code, "PATH_JAIL");
+
+    const escape = await jailed.executeTool("project_read", { path: "../../../etc/passwd" });
+    assert.equal(escape.success, false);
+    assert.equal(escape.code, "PATH_JAIL");
+
+    const denied = await jailed.executeTool("project_write", {
+      path: "src/denied.tsx",
+      content: "nope"
+    });
+    assert.equal(denied.success, false);
+    assert.equal(denied.code, "APPROVAL_REQUIRED");
+
+    const approved = await jailed.executeTool("project_write", {
+      path: "src/denied.tsx",
+      content: "ok",
+      approve: true
+    });
+    assert.equal(approved.success, true);
+
+    const auto = new OpenDesignerService({ projectRoot: TEST_DIR, autoApprove: true });
+    const autoWrite = await auto.executeTool("project_write", {
+      path: "src/auto.tsx",
+      content: "auto"
+    });
+    assert.equal(autoWrite.success, true);
+    const stillJailed = await auto.executeTool("project_read", { path: "/etc/passwd" });
+    assert.equal(stillJailed.success, false);
+    assert.equal(stillJailed.code, "PATH_JAIL");
+
+    const localEscape = await jailed.executeTool("local_read", { path: "../secrets.txt" });
+    assert.equal(localEscape.success, false);
+    assert.equal(localEscape.code, "PATH_JAIL");
+  });
+
+  it("does not mark claims verified from a missing screenshot renderer", async () => {
+    const closed = new OpenDesignerService({ projectRoot: TEST_DIR, screenshotMode: "none" });
+    const pageRes = await closed.executeTool("canvas_create_page", { name: "NoShot" });
+    const shot = await closed.executeTool("take_screenshot", { elementId: pageRes.rootElementId });
+    assert.equal(shot.success, false);
+    assert.equal(shot.implemented, false);
   });
 });

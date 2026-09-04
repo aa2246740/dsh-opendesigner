@@ -1,29 +1,23 @@
-/**
- * DSH OpenDesigner 服务端核心服务
- * 深度融合 Cordis 微内核架构（OpenDesignerService extends Service）
- * 注入 tools 服务，无缝挂载 38 个 MCP 原生工具
- * 支持 .designer/canvas.json 原子持久化与本地 Git 工作区同步
- */
-
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { Context, Service } from "./cordis.ts";
 import { FlatStore } from "../store/flatStore.ts";
 import { ClaimRegistry } from "./claimRegistry.ts";
 import { dispatchMCPTool, OPEN_DESIGNER_TOOLS } from "./mcpTools.ts";
-import type { MCPContext, MCPToolDefinition } from "./mcpTools.ts";
-import { AIGateway, type AIGatewayConfig } from "./aiGateway.ts";
+import type { MCPContext, ScreenshotMode } from "./mcpTools.ts";
+import { AIGateway, type AIGatewayConfig, type AIProvider } from "./aiGateway.ts";
+import { ApprovalRequiredError } from "./approval.ts";
+import { PathJailError } from "./pathJail.ts";
 
 const execFileAsync = promisify(execFile);
 
 export interface OpenDesignerConfig {
   projectRoot?: string;
-  port?: number;
   autoApprove?: boolean;
   ttlMs?: number;
-  modelProvider?: "deepseek" | "openai" | "ollama";
+  screenshotMode?: ScreenshotMode;
+  modelProvider?: AIProvider;
   aiConfig?: Partial<AIGatewayConfig>;
 }
 
@@ -35,13 +29,12 @@ export interface GitSyncStatus {
   canvasTracked: boolean;
 }
 
-export class OpenDesignerService extends Service {
-  public static inject = ["tools"];
+export class OpenDesignerService {
   public static readonly serviceName = "openDesigner";
 
   public projectRoot: string;
-  public port: number;
   public autoApprove: boolean;
+  public screenshotMode: ScreenshotMode;
   public store: FlatStore;
   public claimRegistry: ClaimRegistry;
   public aiGateway: AIGateway;
@@ -49,31 +42,10 @@ export class OpenDesignerService extends Service {
   private designerDir: string;
   private isInitialized: boolean = false;
 
-  constructor(
-    ctxOrConfig?: Context | OpenDesignerConfig,
-    maybeConfig?: OpenDesignerConfig
-  ) {
-    let ctx: Context;
-    let config: OpenDesignerConfig;
-
-    if (
-      ctxOrConfig &&
-      (typeof (ctxOrConfig as Context).provide === "function" ||
-        (ctxOrConfig as Context).tools !== undefined ||
-        maybeConfig !== undefined)
-    ) {
-      ctx = ctxOrConfig as Context;
-      config = maybeConfig || {};
-    } else {
-      ctx = {} as Context;
-      config = (ctxOrConfig as OpenDesignerConfig) || {};
-    }
-
-    super(ctx, "openDesigner", true);
-
-    this.projectRoot = config.projectRoot || process.cwd();
-    this.port = config.port || 21209;
-    this.autoApprove = config.autoApprove ?? true;
+  constructor(config: OpenDesignerConfig = {}) {
+    this.projectRoot = path.resolve(config.projectRoot || process.cwd());
+    this.autoApprove = config.autoApprove ?? false;
+    this.screenshotMode = config.screenshotMode ?? "none";
     this.designerDir = path.join(this.projectRoot, ".designer");
     this.canvasFilePath = path.join(this.designerDir, "canvas.json");
 
@@ -83,68 +55,33 @@ export class OpenDesignerService extends Service {
       provider: config.modelProvider || "deepseek",
       ...config.aiConfig
     });
-
-    // 若运行在 Cordis 微内核宿主环境，注册 38 个 MCP 工具到 DSH tools 服务
-    if (this.ctx && this.ctx.tools) {
-      this.mountDshTools(this.ctx.tools);
-    }
   }
 
-  /**
-   * 将 38 个 MCP 工具挂载为 DSH 原生 Tool
-   */
-  public mountDshTools(toolsService: NonNullable<Context["tools"]>): void {
-    const registerFn =
-      typeof toolsService.defineTool === "function"
-        ? toolsService.defineTool.bind(toolsService)
-        : typeof toolsService.register === "function"
-          ? toolsService.register.bind(toolsService)
-          : null;
-
-    if (!registerFn) return;
-
-    for (const tool of OPEN_DESIGNER_TOOLS) {
-      registerFn({
-        name: tool.name,
-        description: tool.description,
-        category: tool.category,
-        parameters: tool.parameters,
-        execute: async (args: Record<string, any>) => {
-          return await this.executeTool(tool.name, args);
-        }
-      });
-    }
-  }
-
-  /**
-   * Cordis 服务启动生命周期钩子
-   */
   public async start(): Promise<void> {
     await this.init();
-    if (this.ctx && this.ctx.tools) {
-      this.mountDshTools(this.ctx.tools);
-    }
   }
 
-  /**
-   * Cordis 服务停止生命周期钩子
-   */
   public async stop(): Promise<void> {
     await this.saveCanvas();
   }
 
-  /**
-   * 初始化服务，加载现有画布
-   */
   public async init(): Promise<void> {
     if (this.isInitialized) return;
     await this.loadCanvas();
     this.isInitialized = true;
   }
 
-  /**
-   * 从本地 .designer/canvas.json 加载画布
-   */
+  public status(): Record<string, unknown> {
+    return {
+      name: "dsh-opendesigner",
+      projectRoot: this.projectRoot,
+      autoApprove: this.autoApprove,
+      screenshotMode: this.screenshotMode,
+      toolCount: OPEN_DESIGNER_TOOLS.length,
+      ai: this.aiGateway.status()
+    };
+  }
+
   public async loadCanvas(): Promise<boolean> {
     try {
       const raw = await fs.readFile(this.canvasFilePath, "utf-8");
@@ -152,15 +89,10 @@ export class OpenDesignerService extends Service {
       this.store.fromJSON(data);
       return true;
     } catch {
-      // 文件不存在或损坏，使用空白 Store
       return false;
     }
   }
 
-  /**
-   * 原子持久化到本地 .designer/canvas.json
-   * 机制：先写入临时文件 .designer/canvas.json.tmp，然后原子 rename 覆盖
-   */
   public async saveCanvas(): Promise<void> {
     await fs.mkdir(this.designerDir, { recursive: true });
     const tmpPath = `${this.canvasFilePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
@@ -170,10 +102,6 @@ export class OpenDesignerService extends Service {
     await fs.rename(tmpPath, this.canvasFilePath);
   }
 
-  /**
-   * 获取本地 Git 工作区同步状态
-   * 严格遵守安全红线：完全隔离全局与外部配置，仅检查当前 projectRoot
-   */
   public async getGitStatus(): Promise<GitSyncStatus> {
     try {
       const env = {
@@ -216,11 +144,7 @@ export class OpenDesignerService extends Service {
     }
   }
 
-  /**
-   * 本地 Git 工作区同步：暂存 .designer/canvas.json 并生成原子变更记录
-   */
   public async syncGitWorkspace(options: { stageCanvas?: boolean } = {}): Promise<GitSyncStatus> {
-    // 确保最新状态已持久化到磁盘
     await this.saveCanvas();
 
     if (options.stageCanvas) {
@@ -236,42 +160,36 @@ export class OpenDesignerService extends Service {
           env
         });
       } catch {
-        // 非 Git 仓库或暂存失败时静默跳过
+        // Non-git trees skip staging.
       }
     }
 
     return await this.getGitStatus();
   }
 
-  /**
-   * 执行 38 个 MCP 工具调度
-   */
   public async executeTool(toolName: string, args: Record<string, any> = {}): Promise<any> {
     const context: MCPContext = {
       projectRoot: this.projectRoot,
       store: this.store,
       claims: this.claimRegistry,
       autoApprove: this.autoApprove,
+      screenshotMode: this.screenshotMode,
       saveCanvas: () => this.saveCanvas()
     };
 
-    return await dispatchMCPTool(toolName, args, context);
+    try {
+      return await dispatchMCPTool(toolName, args, context);
+    } catch (err) {
+      if (err instanceof PathJailError || err instanceof ApprovalRequiredError) {
+        return { success: false, error: err.message, code: err.code };
+      }
+      throw err;
+    }
   }
 }
 
-/**
- * DSH 插件规范导出
- */
-export const name = "dsh-opendesigner";
-export const inject = ["tools"];
-
-export function apply(ctx: Context, config: OpenDesignerConfig = {}): OpenDesignerService {
-  return new OpenDesignerService(ctx, config);
-}
-
-export default OpenDesignerService;
-
-export * from "./cordis.ts";
 export * from "./claimRegistry.ts";
 export * from "./mcpTools.ts";
 export * from "./aiGateway.ts";
+export * from "./pathJail.ts";
+export * from "./approval.ts";

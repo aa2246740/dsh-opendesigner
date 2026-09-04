@@ -1,3 +1,5 @@
+> **Status.** Historical notes. Not the shipped product spec. Do not use this file as an implementation checklist. Do not extend reverse-engineered protocol detail from it. See [README](../README.md) and [SHIPPED.md](./SHIPPED.md).
+
 # 04. 关系型扁平组件状态库 (Flat Store) 规范
 
 ---

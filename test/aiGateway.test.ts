@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { AIGateway, PROVIDER_DEFAULTS } from "../src/server/aiGateway.ts";
+import { AIGateway, PROVIDER_DEFAULTS, detectAiConfigFromEnv } from "../src/server/aiGateway.ts";
 
 describe("Server - Decoupled Multi-Model AI Gateway", () => {
   it("should configure correct endpoints and defaults for DeepSeek, OpenAI, and Ollama", () => {
@@ -15,6 +15,11 @@ describe("Server - Decoupled Multi-Model AI Gateway", () => {
     const olGateway = new AIGateway({ provider: "ollama" });
     assert.equal(olGateway.baseURL, PROVIDER_DEFAULTS.ollama.baseURL);
     assert.equal(olGateway.model, "qwen2.5-coder:latest");
+
+    const gemGateway = new AIGateway({ provider: "gemini" });
+    assert.equal(gemGateway.baseURL, PROVIDER_DEFAULTS.gemini.baseURL);
+    assert.equal(gemGateway.model, "gemini-2.0-flash");
+    assert.equal(gemGateway.mockMode, true);
   });
 
   it("should generate deterministic mock edits and merge into source code with AST validation", async () => {
@@ -276,5 +281,26 @@ Hope this helps!`;
     assert.equal(res.edits[0].old_string, "bg-red-500");
     assert.equal(res.edits[0].new_string, "bg-emerald-600");
     assert.ok(res.reasoning?.includes("Checking theme colors"));
+  });
+
+  it("detects Gemini before OpenRouter and never returns the key in status()", () => {
+    const gemini = detectAiConfigFromEnv({
+      GEMINI_API_KEY: "secret-gemini",
+      OPENROUTER_ONLYUSE_FREEMODEL_API_KEY: "secret-openrouter"
+    });
+    assert.equal(gemini.provider, "gemini");
+    assert.equal(gemini.model, PROVIDER_DEFAULTS.gemini.defaultModel);
+
+    const gateway = new AIGateway(gemini);
+    const status = gateway.status();
+    assert.equal(status.hasApiKey, true);
+    assert.equal(status.mockMode, false);
+    assert.equal(JSON.stringify(status).includes("secret-gemini"), false);
+
+    const none = detectAiConfigFromEnv({});
+    assert.deepEqual(none, {});
+    const mock = new AIGateway({ provider: "gemini" });
+    assert.equal(mock.mockMode, true);
+    assert.equal(mock.status().hasApiKey, false);
   });
 });

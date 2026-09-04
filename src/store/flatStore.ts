@@ -1,10 +1,10 @@
 /**
- * 扁平化关系型组件存储库 (Flat Relational AST Store)
- * 借鉴 Lunagraph 核心设计，拒绝深层嵌套 JSON，以数据库范式建立索引
- * 支持节点移动、子树克隆与循环引用安全校验
+ * Flattened element store keyed by id.
  */
 
-import { randomUUID } from "node:crypto";
+function createId(): string {
+  return crypto.randomUUID();
+}
 
 export type ElementType = "element" | "text" | "component" | "capture";
 
@@ -172,7 +172,7 @@ export class FlatStore {
    */
   public cloneSubtree(
     rootId: string,
-    idGenerator: (oldId: string) => string = () => randomUUID()
+    idGenerator: (oldId: string) => string = () => createId()
   ): { rootId: string; clonedElements: FEElement[] } {
     const originalSubtree = this.getSubtree(rootId);
     if (originalSubtree.length === 0) {

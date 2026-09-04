@@ -48,7 +48,7 @@ export interface FigmaNode {
   paddingTop?: number;
   paddingBottom?: number;
   primaryAxisAlignItems?: "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
-  counterAxisAlignItems?: "MIN" | "CENTER" | "MAX" | "BASELINE";
+  counterAxisAlignItems?: "MIN" | "CENTER" | "MAX" | "BASELINE" | "STRETCH";
   // Visuals
   fills?: FigmaPaint[];
   strokes?: FigmaPaint[];

@@ -115,6 +115,7 @@ export class ComponentSandbox {
     }
 
     const { tag, props, children } = node;
+    const safeTag = /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tag) ? tag : "div";
     const attrs = Object.entries(props)
       .map(([k, v]) => {
         if (typeof v === "function") return "";
@@ -137,12 +138,12 @@ export class ComponentSandbox {
     const attrStr = attrs ? ` ${attrs}` : "";
 
     const selfClosingTags = new Set(["img", "input", "br", "hr", "meta", "link"]);
-    if (selfClosingTags.has(tag.toLowerCase()) && children.length === 0) {
-      return `<${tag}${attrStr} />`;
+    if (selfClosingTags.has(safeTag.toLowerCase()) && children.length === 0) {
+      return `<${safeTag}${attrStr} />`;
     }
 
     const innerHtml = children.map((c) => this.nodeToHtmlString(c)).join("");
-    return `<${tag}${attrStr}>${innerHtml}</${tag}>`;
+    return `<${safeTag}${attrStr}>${innerHtml}</${safeTag}>`;
   }
 
   private escapeHtml(str: string): string {

@@ -1,3 +1,5 @@
+> **Status.** Historical notes. Not the shipped product spec. Do not use this file as an implementation checklist. Do not extend reverse-engineered protocol detail from it. See [README](../README.md) and [SHIPPED.md](./SHIPPED.md).
+
 # 05. 无限画布几何变换、6线智能吸附与多选缩放算法
 
 ---

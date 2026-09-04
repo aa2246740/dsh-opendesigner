@@ -4,11 +4,14 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { FlatStore } from "../store/flatStore.ts";
 import type { FEElement } from "../store/flatStore.ts";
 import { ClaimRegistry } from "./claimRegistry.ts";
 import { applySurgicalEdits } from "../compiler/aiMerge.ts";
-import { randomUUID } from "node:crypto";
+import { assertDestructiveApproval } from "./approval.ts";
+import { snapshotJsxAsSvgDataUrl } from "./jsxSnapshot.ts";
+import { PathJailError, resolveProjectPath } from "./pathJail.ts";
 
 export interface MCPToolDefinition {
   name: string;
@@ -18,11 +21,15 @@ export interface MCPToolDefinition {
   parameters?: Record<string, any>;
 }
 
+export type ScreenshotMode = "none" | "jsx-svg";
+
 export interface MCPContext {
   projectRoot: string;
   store: FlatStore;
   claims: ClaimRegistry;
   autoApprove?: boolean;
+  screenshotMode?: ScreenshotMode;
+  captureScreenshot?: (elementId: string) => Promise<string | null>;
   saveCanvas?: () => Promise<void>;
 }
 
@@ -161,7 +168,7 @@ export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   // 类别 2: Local Filesystem Tools (7)
   {
     name: "local_read",
-    description: "读取宿主本地磁盘文件",
+    description: "读取工程根目录内文件（与 project_read 同一 jail，禁止绝对路径与 .. 逃逸）",
     category: "local",
     parameters: {
       type: "object",
@@ -171,7 +178,7 @@ export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   },
   {
     name: "local_read_batch",
-    description: "批量读取宿主本地文件",
+    description: "批量读取工程根目录内文件（同一 jail）",
     category: "local",
     parameters: {
       type: "object",
@@ -181,7 +188,7 @@ export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   },
   {
     name: "local_write",
-    description: "写入宿主本地代码文件",
+    description: "写入工程根目录内文件（同一 jail；破坏性操作需 approve）",
     category: "local",
     destructive: true,
     parameters: {
@@ -195,7 +202,7 @@ export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   },
   {
     name: "local_edit",
-    description: "修改宿主本地文件内容",
+    description: "修改工程根目录内文件（同一 jail；破坏性操作需 approve）",
     category: "local",
     destructive: true,
     parameters: {
@@ -210,7 +217,7 @@ export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   },
   {
     name: "local_glob",
-    description: "在宿主本地匹配文件路径",
+    description: "在工程根目录内匹配相对路径（同一 jail）",
     category: "local",
     parameters: {
       type: "object",
@@ -220,7 +227,7 @@ export const OPEN_DESIGNER_TOOLS: MCPToolDefinition[] = [
   },
   {
     name: "local_grep",
-    description: "在宿主本地搜索正则内容",
+    description: "在工程根目录内搜索正则（同一 jail）",
     category: "local",
     parameters: {
       type: "object",
@@ -514,14 +521,24 @@ async function getFilesRecursively(dir: string, baseDir: string = dir): Promise<
   return results;
 }
 
+function projectFile(ctx: MCPContext, requested: unknown): string {
+  return resolveProjectPath(ctx.projectRoot, requested);
+}
+
 /**
- * 38 个 MCP 工具的本地调度处理器
+ * Dispatcher for the OpenDesigner tool catalog.
  */
 export async function dispatchMCPTool(
   toolName: string,
   args: Record<string, any>,
   ctx: MCPContext
 ): Promise<any> {
+  const tool = OPEN_DESIGNER_TOOLS.find((entry) => entry.name === toolName);
+  if (!tool) {
+    throw new Error(`Unknown MCP Tool: ${toolName}`);
+  }
+  assertDestructiveApproval(tool, ctx, args);
+
   const { projectRoot, store, claims, saveCanvas } = ctx;
 
   switch (toolName) {
@@ -543,7 +560,7 @@ export async function dispatchMCPTool(
     }
 
     case "project_read": {
-      const targetPath = path.resolve(projectRoot, args.path);
+      const targetPath = projectFile(ctx, args.path);
       const content = await fs.readFile(targetPath, "utf-8");
       const lines = content.split("\n");
       const offset = args.offset || 0;
@@ -584,7 +601,7 @@ export async function dispatchMCPTool(
     }
 
     case "project_write": {
-      const targetPath = path.resolve(projectRoot, args.path);
+      const targetPath = projectFile(ctx, args.path);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, args.content, "utf-8");
       return { success: true, path: args.path };
@@ -593,7 +610,7 @@ export async function dispatchMCPTool(
     case "project_write_batch": {
       const written: string[] = [];
       for (const f of args.files || []) {
-        const targetPath = path.resolve(projectRoot, f.path);
+        const targetPath = projectFile(ctx, f.path);
         await fs.mkdir(path.dirname(targetPath), { recursive: true });
         await fs.writeFile(targetPath, f.content, "utf-8");
         written.push(f.path);
@@ -602,7 +619,7 @@ export async function dispatchMCPTool(
     }
 
     case "project_edit": {
-      const targetPath = path.resolve(projectRoot, args.path);
+      const targetPath = projectFile(ctx, args.path);
       const content = await fs.readFile(targetPath, "utf-8");
       const res = applySurgicalEdits(content, [
         {
@@ -619,14 +636,14 @@ export async function dispatchMCPTool(
     }
 
     case "project_delete": {
-      const targetPath = path.resolve(projectRoot, args.path);
+      const targetPath = projectFile(ctx, args.path);
       await fs.unlink(targetPath);
       return { success: true };
     }
 
     case "project_copy_asset": {
-      const src = path.resolve(projectRoot, args.sourcePath);
-      const dest = path.resolve(projectRoot, args.targetPath);
+      const src = projectFile(ctx, args.sourcePath);
+      const dest = projectFile(ctx, args.targetPath);
       await fs.mkdir(path.dirname(dest), { recursive: true });
       await fs.copyFile(src, dest);
       return { success: true };
@@ -634,7 +651,7 @@ export async function dispatchMCPTool(
 
     // --- 类别 2: Local Filesystem Tools ---
     case "local_read": {
-      const targetPath = path.resolve(projectRoot, args.path);
+      const targetPath = projectFile(ctx, args.path);
       const content = await fs.readFile(targetPath, "utf-8");
       return { content };
     }
@@ -643,7 +660,7 @@ export async function dispatchMCPTool(
       const results: Record<string, string> = {};
       for (const p of args.paths || []) {
         try {
-          const targetPath = path.resolve(projectRoot, p);
+          const targetPath = projectFile(ctx, p);
           results[p] = await fs.readFile(targetPath, "utf-8");
         } catch {
           results[p] = "";
@@ -653,14 +670,14 @@ export async function dispatchMCPTool(
     }
 
     case "local_write": {
-      const targetPath = path.resolve(projectRoot, args.path);
+      const targetPath = projectFile(ctx, args.path);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, args.content, "utf-8");
       return { success: true };
     }
 
     case "local_edit": {
-      const targetPath = path.resolve(projectRoot, args.path);
+      const targetPath = projectFile(ctx, args.path);
       const content = await fs.readFile(targetPath, "utf-8");
       const res = applySurgicalEdits(content, [
         {
@@ -845,19 +862,19 @@ export async function dispatchMCPTool(
     }
 
     case "canvas_insert": {
-      const { claim_id, targetId, position, element } = args;
+      const { claim_id, targetId, position } = args;
       const isDescendant = (anc: string, tgt: string) => store.isDescendant(anc, tgt);
       const validation = claims.validateClaim(claim_id, targetId, isDescendant);
       if (!validation.valid) return { success: false, error: validation.error };
 
       claims.recordMutation(claim_id);
-      const id = element?.id || randomUUID();
+      const id = args.element?.id || randomUUID();
       const newEl: FEElement = {
         id,
-        type: element?.type || "element",
-        tag: element?.tag || "div",
-        props: element?.props || {},
-        textContent: element?.textContent
+        type: args.element?.type || args.type || "element",
+        tag: args.tag || args.element?.tag || "div",
+        props: args.props || args.element?.props || {},
+        textContent: args.textContent ?? args.element?.textContent
       };
       store.setElement(newEl);
 
@@ -1002,9 +1019,25 @@ export async function dispatchMCPTool(
 
     case "take_screenshot": {
       const elementId = args.elementId || "";
+      let screenshotDataUrl: string | null = null;
+
+      if (ctx.captureScreenshot) {
+        screenshotDataUrl = await ctx.captureScreenshot(elementId);
+      } else if (ctx.screenshotMode === "jsx-svg" && elementId) {
+        const jsx = elementToJSX(store, elementId);
+        screenshotDataUrl = snapshotJsxAsSvgDataUrl(elementId, jsx);
+      }
+
+      if (!screenshotDataUrl) {
+        return {
+          success: false,
+          implemented: false,
+          error: "SCREENSHOT_UNAVAILABLE: no renderer is attached. OpenDesigner does not mark claims verified from a placeholder image."
+        };
+      }
+
       if (elementId) {
         claims.recordVerification(elementId);
-        // 如果该节点处于被锁定的父级/祖先容器内，同时对祖先节点的锁进行验证标记
         let parent = store.getParent(elementId);
         while (parent) {
           claims.recordVerification(parent.id);
@@ -1014,12 +1047,12 @@ export async function dispatchMCPTool(
       if (args.claim_id) {
         claims.recordVerification(args.claim_id);
       }
-      // 生成确定性离屏快照 Base64 数据
-      const mockPngBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
       return {
         success: true,
         elementId,
-        screenshotDataUrl: mockPngBase64
+        kind: ctx.captureScreenshot ? "renderer" : "jsx-svg",
+        screenshotDataUrl
       };
     }
 
@@ -1027,18 +1060,18 @@ export async function dispatchMCPTool(
     case "list_skills": {
       return {
         skills: [
-          { name: "lunagraph-design", description: "Visual design systems, spacing, typography, and color tokens" },
-          { name: "lunagraph-import-from-project", description: "Scan and import React components from project repository" },
-          { name: "lunagraph-compositions", description: "Design isolated compositions and variant galleries" }
+          { name: "opendesigner-design", description: "Visual design systems, spacing, typography, and color tokens" },
+          { name: "opendesigner-import-from-project", description: "Scan and import React components from the project repository" },
+          { name: "opendesigner-compositions", description: "Design isolated compositions and variant galleries" }
         ]
       };
     }
 
     case "read_skill": {
-      const name = args.name || "lunagraph-design";
+      const name = args.name || "opendesigner-design";
       return {
         name,
-        content: `# Skill: ${name}\n\nStrict guidelines for React 19 visual component editing and Tailwind styling.`
+        content: `# Skill: ${name}\n\nGuidelines for React + Tailwind visual component editing in OpenDesigner.`
       };
     }
 
