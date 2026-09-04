@@ -96,7 +96,10 @@ export class SelectionOverlayRenderer {
 
       for (const h of handles) {
         parts.push(
-          `<rect class="resize-handle handle-${h.handle}" x="${h.point.x - half}" y="${h.point.y - half}" width="${this.handleSize}" height="${this.handleSize}" fill="#ffffff" stroke="${this.strokeColor}" stroke-width="1.5" style="pointer-events:auto;cursor:${h.cursor};" data-handle="${h.handle}" />`
+          `<g class="resize-handle-group" data-handle="${h.handle}" data-testid="overlay-handle-${h.handle}" style="pointer-events:auto;cursor:${h.cursor};">
+            <title>Resize ${h.handle}</title>
+            <rect class="resize-handle handle-${h.handle}" x="${h.point.x - half}" y="${h.point.y - half}" width="${this.handleSize}" height="${this.handleSize}" fill="#ffffff" stroke="${this.strokeColor}" stroke-width="1.5" />
+          </g>`
         );
       }
     }

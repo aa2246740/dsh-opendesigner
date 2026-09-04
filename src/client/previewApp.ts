@@ -1,7 +1,8 @@
 import { CanvasPanel } from "./canvas/index.ts";
 import { FlatStore } from "../store/flatStore.ts";
-import { StylesPanelManager } from "./stylesPanel.ts";
+import { StylesPanelManager, type ParsedStyles } from "./stylesPanel.ts";
 import { mergeTailwindClasses } from "../compiler/tailwindMerge.ts";
+import { bindPreviewCanvasUx, refreshOverlay } from "./previewCanvasUx.ts";
 
 export interface PreviewApi {
   getStatus?: () => Promise<Record<string, unknown>>;
@@ -20,6 +21,11 @@ const TITLE_ID = "hero-title";
 const BODY_ID = "hero-body";
 const BTN_ID = "primary-btn";
 const BATCH_FILE = "src/agent-batch-demo.txt";
+
+const FILL_SWATCHES = ["slate-900", "emerald-600", "indigo-600", "rose-600"];
+const TEXT_SWATCHES = ["slate-100", "amber-300", "rose-400", "emerald-400"];
+const RADIUS_VALUES = ["none", "md", "xl", "full"];
+const PADDING_VALUES = ["2", "4", "6", "8"];
 
 function seedStore(store: FlatStore): void {
   store.setElement({
@@ -90,9 +96,22 @@ function setClassName(store: FlatStore, id: string, className: string): void {
   store.setElement(el);
 }
 
+function listElementIds(store: FlatStore): string[] {
+  return Object.keys(store.toJSON().byId);
+}
+
+function swatchButtons(prefix: string, values: string[], kind: "bg" | "text"): string {
+  return values
+    .map((value) => {
+      const colorClass = kind === "bg" ? `bg-${value}` : `bg-${value}`;
+      return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" title="${value}"></button>`;
+    })
+    .join("");
+}
+
 export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPanel {
   const store = new FlatStore();
-  const panel = new CanvasPanel({ store });
+  const panel = new CanvasPanel({ store, handleSize: 12 });
   let dirty = false;
   let openBatchId: string | null = null;
 
@@ -120,13 +139,25 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       </header>
       <div class="od-main">
         <aside class="od-layers" data-testid="layer-tree"></aside>
-        <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
+        <div class="od-canvas-col">
+          <div class="od-canvas-toolbar" data-testid="canvas-toolbar">
+            <button type="button" data-testid="zoom-out" id="od-zoom-out" title="Zoom out">−</button>
+            <span class="od-zoom-label" data-testid="zoom-label" id="od-zoom-label" title="Current zoom">100%</span>
+            <button type="button" data-testid="zoom-in" id="od-zoom-in" title="Zoom in">+</button>
+            <button type="button" data-testid="zoom-reset" id="od-zoom-reset" title="Reset pan and zoom">Reset view</button>
+            <button type="button" data-testid="insert-box" id="od-insert-box" title="Insert a sibling box">Insert box</button>
+            <button type="button" data-testid="delete-element" id="od-delete-element" title="Delete selected">Delete</button>
+            <span class="od-hud" data-testid="canvas-hud" id="od-hud">idle</span>
+          </div>
+          <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
+        </div>
         <aside class="od-styles">
           <div class="od-styles-title">Styles</div>
-          <div id="od-selected" class="od-mono"></div>
+          <div id="od-selected" class="od-mono" data-testid="selected-id"></div>
+          <div id="od-inspector" class="od-inspector" data-testid="styles-inspector"></div>
           <div class="od-actions">
-            <button type="button" data-testid="edit-fill" id="od-edit-fill">Fill emerald</button>
-            <button type="button" data-testid="edit-radius" id="od-edit-radius">Radius xl</button>
+            <button type="button" data-testid="edit-fill" id="od-edit-fill" title="Fill emerald shortcut">Fill emerald</button>
+            <button type="button" data-testid="edit-radius" id="od-edit-radius" title="Radius xl shortcut">Radius xl</button>
             <button type="button" data-testid="ai-merge" id="od-ai-merge">AI merge</button>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
@@ -158,21 +189,81 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   const aiEl = root.querySelector("#od-ai") as HTMLElement;
   const persistEl = root.querySelector("#od-persist") as HTMLElement;
   const autosaveEl = root.querySelector("#od-autosave") as HTMLElement;
+  const inspectorEl = root.querySelector("#od-inspector") as HTMLElement;
+  const hudEl = root.querySelector("#od-hud") as HTMLElement;
+  const zoomLabelEl = root.querySelector("#od-zoom-label") as HTMLElement;
 
-  function render(): void {
-    syncGeometry();
-    canvasEl.innerHTML = panel.renderHtml();
-    const ids = [CARD_ID, BADGE_ID, TITLE_ID, BODY_ID, BTN_ID];
-    layersEl.innerHTML = ids
+  function selectedId(): string {
+    return panel.selection.getSelectedIds()[0] || "";
+  }
+
+  function updateHud(): void {
+    const ids = panel.selection.getSelectedIds();
+    const box = panel.getSelectedBoundingBox();
+    const zoom = Math.round(panel.viewport.getZoom() * 100);
+    const pan = panel.viewport.getPan();
+    const rectText = box
+      ? `${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}×${Math.round(box.height)}`
+      : "none";
+    hudEl.textContent = `${panel.controller.getMode()} · z${zoom}% · pan ${Math.round(pan.x)},${Math.round(pan.y)} · ${ids.join(",") || "none"} · ${rectText} · guides ${panel.controller.getGuides().length}`;
+    zoomLabelEl.textContent = `${zoom}%`;
+  }
+
+  function renderInspector(): void {
+    const id = selectedId();
+    if (!id) {
+      inspectorEl.innerHTML = `<div class="od-hint">Select an element to edit fill, radius, padding, and text color.</div>`;
+      return;
+    }
+    const className = classNameOf(store, id);
+    const parsed = StylesPanelManager.parseClasses(className);
+    const sections = StylesPanelManager.buildPanelSections(className);
+    const wanted = new Set(["backgroundColor", "borderRadius", "padding", "textColor"]);
+    const present = sections.flatMap((section) => section.controls).filter((control) => wanted.has(control.name));
+    inspectorEl.innerHTML = `
+      <div class="od-field">
+        <div class="od-field-label">Fill ${parsed.backgroundColor || ""}</div>
+        <div class="od-swatches">${swatchButtons("style-fill", FILL_SWATCHES, "bg")}</div>
+      </div>
+      <div class="od-field">
+        <div class="od-field-label">Radius ${parsed.borderRadius || ""}</div>
+        <div class="od-chip-row">${RADIUS_VALUES.map((value) => `<button type="button" data-testid="style-radius-${value}" data-radius="${value}">${value}</button>`).join("")}</div>
+      </div>
+      <div class="od-field">
+        <div class="od-field-label">Padding ${parsed.padding || parsed.paddingX || ""}</div>
+        <div class="od-chip-row">${PADDING_VALUES.map((value) => `<button type="button" data-testid="style-padding-${value}" data-padding="${value}">p-${value}</button>`).join("")}</div>
+      </div>
+      <div class="od-field">
+        <div class="od-field-label">Text color ${parsed.textColor || ""}</div>
+        <div class="od-swatches">${swatchButtons("style-text", TEXT_SWATCHES, "text")}</div>
+      </div>
+      <div class="od-hint">${present.map((control) => control.name).join(" · ")}</div>
+    `;
+  }
+
+  function renderLayers(): void {
+    const ids = listElementIds(store);
+    layersEl.innerHTML = `<div class="od-styles-title">Layers</div>` + ids
       .map((id) => {
         const el = store.getElement(id);
-        const selected = panel.selection.getSelectedIds().includes(id);
-        return `<button type="button" class="od-layer${selected ? " is-selected" : ""}" data-id="${id}">${el?.tag} ${id}</button>`;
+        const selected = panel.selection.isSelected(id);
+        return `<button type="button" class="od-layer${selected ? " is-selected" : ""}" data-testid="layer-${id}" data-id="${id}">${el?.tag || "node"} ${id}</button>`;
       })
       .join("");
-    const selectedId = panel.selection.getSelectedIds()[0] || CARD_ID;
-    selectedEl.textContent = selectedId;
-    classEl.textContent = classNameOf(store, selectedId);
+  }
+
+  function render(options: { preserveViewport?: boolean } = {}): void {
+    const selected = panel.selection.getSelectedIds();
+    syncGeometry();
+    if (selected.length) panel.select(selected.filter((id) => store.getElement(id)));
+    canvasEl.innerHTML = panel.renderHtml();
+    renderLayers();
+    renderInspector();
+    const id = selectedId();
+    selectedEl.textContent = id || "(none)";
+    classEl.textContent = id ? classNameOf(store, id) : "";
+    updateHud();
+    if (options.preserveViewport) refreshOverlay(canvasEl, panel);
   }
 
   async function refreshStatus(): Promise<void> {
@@ -207,6 +298,52 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     dirty = false;
   }
 
+  function applyStyle(property: keyof ParsedStyles, value: string, label: string): void {
+    const id = selectedId();
+    if (!id) return;
+    const next = StylesPanelManager.applyPropertyChange(classNameOf(store, id), property, value);
+    setClassName(store, id, next);
+    render();
+    void checkpointAndAutosave(label);
+  }
+
+  function insertBox(): void {
+    let n = 1;
+    while (store.getElement(`insert-box-${n}`)) n += 1;
+    const id = `insert-box-${n}`;
+    const left = 470 + (n - 1) * 16;
+    store.setElement({
+      id,
+      type: "element",
+      tag: "div",
+      props: {
+        className: "rounded-lg bg-amber-400 text-slate-900 text-xs font-semibold px-3 py-2 shadow-md",
+        "data-testid": `node-${id}`
+      },
+      textContent: `Insert ${n}`,
+      canvasRect: { left, top: 48, width: 140, height: 88 }
+    });
+    panel.select([id]);
+    render();
+    void checkpointAndAutosave("insert-box");
+  }
+
+  function deleteSelected(): void {
+    const ids = panel.selection.getSelectedIds();
+    if (ids.length === 0) return;
+    for (const id of ids) panel.unregisterElement(id);
+    panel.selection.clearSelection();
+    render();
+    void checkpointAndAutosave("delete-element");
+  }
+
+  function zoomBy(factor: number): void {
+    const bounds = canvasEl.getBoundingClientRect();
+    panel.viewport.zoomAt({ x: bounds.width / 2, y: bounds.height / 2 }, factor);
+    refreshOverlay(canvasEl, panel);
+    updateHud();
+  }
+
   layersEl.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     const id = target.getAttribute("data-id");
@@ -215,16 +352,29 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     render();
   });
 
+  inspectorEl.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const fill = target.getAttribute("data-testid")?.startsWith("style-fill-")
+      ? target.getAttribute("data-value")
+      : null;
+    const radius = target.getAttribute("data-radius");
+    const padding = target.getAttribute("data-padding");
+    const text = target.getAttribute("data-testid")?.startsWith("style-text-")
+      ? target.getAttribute("data-value")
+      : null;
+    if (fill) applyStyle("backgroundColor", fill, `fill-${fill}`);
+    else if (radius) applyStyle("borderRadius", radius, `radius-${radius}`);
+    else if (padding) applyStyle("padding", padding, `padding-${padding}`);
+    else if (text) applyStyle("textColor", text, `text-${text}`);
+  });
+
   root.querySelector("#od-edit-fill")!.addEventListener("click", () => {
-    const id = panel.selection.getSelectedIds()[0] || CARD_ID;
-    const next = StylesPanelManager.applyPropertyChange(classNameOf(store, id), "backgroundColor", "emerald-600");
-    setClassName(store, id, next);
-    render();
-    void checkpointAndAutosave("fill-emerald");
+    applyStyle("backgroundColor", "emerald-600", "fill-emerald");
   });
 
   root.querySelector("#od-edit-radius")!.addEventListener("click", () => {
-    const id = panel.selection.getSelectedIds()[0] || CARD_ID;
+    const id = selectedId() || CARD_ID;
+    if (!selectedId()) panel.select([id]);
     const next = mergeTailwindClasses(classNameOf(store, id), "rounded-xl");
     setClassName(store, id, next);
     render();
@@ -235,7 +385,8 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     const result = await callTool("rewind");
     if (result.success && result.store) {
       store.fromJSON(result.store);
-      panel.select([CARD_ID]);
+      const ids = listElementIds(store);
+      panel.select(ids.includes(CARD_ID) ? [CARD_ID] : ids.slice(0, 1));
       render();
     }
   });
@@ -282,7 +433,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       aiEl.textContent = "AI merge endpoint is not attached.";
       return;
     }
-    const id = panel.selection.getSelectedIds()[0] || BTN_ID;
+    const id = selectedId() || BTN_ID;
     const source = `<button className="${classNameOf(store, id)}">${store.getElement(id)?.textContent || ""}</button>`;
     const result = await api.applyAiMerge(source, "Add shadow-lg to the button className");
     if (result.success && result.mergedCode) {
@@ -293,6 +444,31 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       void checkpointAndAutosave("ai-merge");
     } else {
       aiEl.textContent = result.error || "AI merge failed";
+    }
+  });
+
+  root.querySelector("#od-insert-box")!.addEventListener("click", () => insertBox());
+  root.querySelector("#od-delete-element")!.addEventListener("click", () => deleteSelected());
+  root.querySelector("#od-zoom-in")!.addEventListener("click", () => zoomBy(1.15));
+  root.querySelector("#od-zoom-out")!.addEventListener("click", () => zoomBy(1 / 1.15));
+  root.querySelector("#od-zoom-reset")!.addEventListener("click", () => {
+    panel.viewport.reset();
+    refreshOverlay(canvasEl, panel);
+    updateHud();
+  });
+
+  bindPreviewCanvasUx(canvasEl, panel, store, {
+    onCommit: (label) => {
+      void checkpointAndAutosave(label);
+    },
+    onFullRender: () => render(),
+    onHud: () => {
+      renderLayers();
+      renderInspector();
+      const id = selectedId();
+      selectedEl.textContent = id || "(none)";
+      classEl.textContent = id ? classNameOf(store, id) : "";
+      updateHud();
     }
   });
 

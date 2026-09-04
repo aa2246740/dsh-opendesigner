@@ -19,6 +19,7 @@ export interface CanvasPanelOptions {
   initialZoom?: number;
   initialPan?: Point;
   snapThreshold?: number;
+  handleSize?: number;
   store?: FlatStore;
 }
 
@@ -42,7 +43,9 @@ export class CanvasPanel {
     });
     this.selection = new SelectionManager();
     this.controller = new CanvasInteractionController(this.viewport, this.selection);
-    this.overlay = new SelectionOverlayRenderer();
+    this.overlay = new SelectionOverlayRenderer({
+      handleSize: options.handleSize ?? 12
+    });
     this.sandbox = new ComponentSandbox();
     this.stylesPanel = new StylesPanelManager();
     this.store = options.store || new FlatStore();
@@ -55,9 +58,7 @@ export class CanvasPanel {
   public registerElement(id: string, rect: Rect, element?: FEElement): void {
     this.elementRects.set(id, { ...rect });
     if (element) {
-      if (!element.canvasRect) {
-        element.canvasRect = { ...rect };
-      }
+      element.canvasRect = { ...rect };
       this.store.setElement(element);
     }
     this.syncSelectionManager();
@@ -126,6 +127,68 @@ export class CanvasPanel {
   }
 
   /**
+   * Hit-test world point against registered rects. Prefers the smallest containing box
+   * so nested children win over their parent.
+   */
+  public hitTest(worldPoint: Point): string | null {
+    let bestId: string | null = null;
+    let bestArea = Infinity;
+    for (const [id, rect] of this.elementRects.entries()) {
+      if (
+        worldPoint.x >= rect.left &&
+        worldPoint.x <= rect.left + rect.width &&
+        worldPoint.y >= rect.top &&
+        worldPoint.y <= rect.top + rect.height
+      ) {
+        const area = Math.max(1, rect.width * rect.height);
+        if (area <= bestArea) {
+          bestArea = area;
+          bestId = id;
+        }
+      }
+    }
+    return bestId;
+  }
+
+  private persistRect(id: string, rect: Rect): void {
+    this.elementRects.set(id, { ...rect });
+    const el = this.store.getElement(id);
+    if (el) {
+      el.canvasRect = { ...rect };
+    }
+  }
+
+  /**
+   * When a parent box moves or its origin shifts, keep descendant world rects in sync
+   * so nested DOM children and hit-testing stay aligned.
+   */
+  private translateUnselectedDescendants(
+    movedIds: Set<string>,
+    before: Map<string, Rect>
+  ): void {
+    for (const id of movedIds) {
+      const prev = before.get(id);
+      const next = this.elementRects.get(id);
+      if (!prev || !next) continue;
+      const dx = next.left - prev.left;
+      const dy = next.top - prev.top;
+      if (dx === 0 && dy === 0) continue;
+      for (const desc of this.store.getSubtree(id)) {
+        if (desc.id === id || movedIds.has(desc.id)) continue;
+        const current = this.elementRects.get(desc.id);
+        if (!current) continue;
+        this.persistRect(desc.id, {
+          left: current.left + dx,
+          top: current.top + dy,
+          width: current.width,
+          height: current.height
+        });
+      }
+    }
+    this.syncSelectionManager();
+  }
+
+  /**
    * 执行拖拽移动 (打通 6 线智能吸附)
    */
   public moveSelected(screenPoint: Point): {
@@ -134,6 +197,7 @@ export class CanvasPanel {
     guides: SnapGuide[];
     snapped: boolean;
   } | null {
+    const before = this.getAllElementRects();
     const candidates = this.getAlignmentCandidates();
     const res = this.controller.updateDrag(screenPoint, {
       candidates,
@@ -143,12 +207,12 @@ export class CanvasPanel {
 
     if (res && res.updatedElements) {
       for (const item of res.updatedElements) {
-        this.elementRects.set(item.id, { ...item.rect });
-        const el = this.store.getElement(item.id);
-        if (el) {
-          el.canvasRect = { ...item.rect };
-        }
+        this.persistRect(item.id, item.rect);
       }
+      this.translateUnselectedDescendants(
+        new Set(res.updatedElements.map((item) => item.id)),
+        before
+      );
     }
 
     return res;
@@ -163,6 +227,7 @@ export class CanvasPanel {
     guides: SnapGuide[];
     snapped: boolean;
   } | null {
+    const before = this.getAllElementRects();
     const candidates = this.getAlignmentCandidates();
     const res = this.controller.updateResize(screenPoint, {
       candidates,
@@ -172,12 +237,12 @@ export class CanvasPanel {
 
     if (res && res.updatedElements) {
       for (const item of res.updatedElements) {
-        this.elementRects.set(item.id, { ...item.rect });
-        const el = this.store.getElement(item.id);
-        if (el) {
-          el.canvasRect = { ...item.rect };
-        }
+        this.persistRect(item.id, item.rect);
       }
+      this.translateUnselectedDescendants(
+        new Set(res.updatedElements.map((item) => item.id)),
+        before
+      );
     }
 
     return res;
@@ -202,10 +267,10 @@ export class CanvasPanel {
     const overlaySvg = this.overlay.renderSvgOverlay(box, guides);
 
     return [
-      `<div class="opendesigner-canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
-      `  <div class="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;">`,
+      `<div class="opendesigner-canvas-container" data-testid="canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
+      `  <div class="canvas-viewport-layer" data-testid="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;width:100%;height:100%;">`,
       `    ${elementsHtml.join("\n    ")}`,
-      `    ${overlaySvg}`,
+      `    <div class="canvas-overlay-host" data-testid="canvas-overlay" style="pointer-events:none;position:absolute;inset:0;">${overlaySvg}</div>`,
       `  </div>`,
       `</div>`
     ].join("\n");

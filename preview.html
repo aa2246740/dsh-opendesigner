@@ -15,7 +15,15 @@
     .od-layers, .od-styles { border-color: #1e293b; border-style: solid; padding: 12px; overflow: auto; background: #020617; }
     .od-layers { border-right-width: 1px; display: flex; flex-direction: column; gap: 6px; }
     .od-styles { border-left-width: 1px; }
-    .od-canvas { position: relative; overflow: hidden; background-image: radial-gradient(circle, rgba(255,255,255,0.08) 1px, transparent 1px); background-size: 24px 24px; }
+    .od-canvas-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .od-canvas-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #1e293b; background: #020617; }
+    .od-canvas-toolbar button { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+    .od-zoom-label, .od-hud { font-size: 11px; color: #94a3b8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .od-hud { flex: 1; min-width: 180px; }
+    .od-canvas { position: relative; overflow: hidden; flex: 1; touch-action: none; user-select: none; background-image: radial-gradient(circle, rgba(255,255,255,0.08) 1px, transparent 1px); background-size: 24px 24px; }
+    .od-canvas:focus { outline: 1px solid #6366f1; }
+    .canvas-overlay-host { pointer-events: none; }
+    .resize-handle:hover { fill: #93c5fd; }
     .od-layer { text-align: left; background: #0f172a; color: #cbd5e1; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; cursor: pointer; }
     .od-layer.is-selected { border-color: #6366f1; color: #c7d2fe; }
     .od-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
@@ -26,6 +34,11 @@
     .od-actions button[data-testid="batch-apply"] { background: #0f766e; }
     .od-styles-title { font-weight: 600; margin: 16px 0 8px; }
     .od-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: pre-wrap; background: #0f172a; padding: 8px; border-radius: 8px; }
+    .od-inspector { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 12px; }
+    .od-field-label, .od-hint { font-size: 11px; color: #94a3b8; }
+    .od-swatches, .od-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .od-swatch { width: 22px; height: 22px; border-radius: 4px; border: 1px solid #64748b; cursor: pointer; }
+    .od-chip-row button { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 4px 8px; cursor: pointer; font-size: 11px; }
   </style>
 </head>
 <body>

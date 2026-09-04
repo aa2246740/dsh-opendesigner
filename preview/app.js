@@ -318,7 +318,10 @@ var OpenDesignerPreview = (() => {
         const handles = this.computeHandles(box);
         for (const h of handles) {
           parts.push(
-            `<rect class="resize-handle handle-${h.handle}" x="${h.point.x - half}" y="${h.point.y - half}" width="${this.handleSize}" height="${this.handleSize}" fill="#ffffff" stroke="${this.strokeColor}" stroke-width="1.5" style="pointer-events:auto;cursor:${h.cursor};" data-handle="${h.handle}" />`
+            `<g class="resize-handle-group" data-handle="${h.handle}" data-testid="overlay-handle-${h.handle}" style="pointer-events:auto;cursor:${h.cursor};">
+            <title>Resize ${h.handle}</title>
+            <rect class="resize-handle handle-${h.handle}" x="${h.point.x - half}" y="${h.point.y - half}" width="${this.handleSize}" height="${this.handleSize}" fill="#ffffff" stroke="${this.strokeColor}" stroke-width="1.5" />
+          </g>`
           );
         }
       }
@@ -1256,7 +1259,7 @@ var OpenDesignerPreview = (() => {
     /**
      * 将 FlatStore 节点递归渲染为安全虚拟 DOM 结构
      */
-    renderElement(store, elementId) {
+    renderElement(store, elementId, parentRect) {
       const el = store.getElement(elementId);
       if (!el) return "";
       if (el.type === "text") {
@@ -1268,7 +1271,7 @@ var OpenDesignerPreview = (() => {
         renderedChildren.push(el.textContent);
       }
       for (const child of children) {
-        renderedChildren.push(this.renderElement(store, child.id));
+        renderedChildren.push(this.renderElement(store, child.id, el.canvasRect));
       }
       let finalTag = el.tag;
       const finalProps = { ...el.props || {} };
@@ -1294,11 +1297,42 @@ var OpenDesignerPreview = (() => {
       if (!finalProps["data-element-id"]) {
         finalProps["data-element-id"] = el.id;
       }
+      if (!finalProps["data-testid"]) {
+        finalProps["data-testid"] = `node-${el.id}`;
+      }
+      if (el.canvasRect) {
+        this.applyCanvasRectStyle(finalProps, el.canvasRect, parentRect);
+      }
       return {
         tag: finalTag,
         props: finalProps,
         children: renderedChildren
       };
+    }
+    /**
+     * Map world canvasRect onto a positioned node. Nested children use parent-relative left/top.
+     */
+    applyCanvasRectStyle(props, rect, parentRect) {
+      const left = parentRect ? rect.left - parentRect.left : rect.left;
+      const top = parentRect ? rect.top - parentRect.top : rect.top;
+      const layout = {
+        position: "absolute",
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+        boxSizing: "border-box"
+      };
+      if (props.style && typeof props.style === "object" && !Array.isArray(props.style)) {
+        props.style = { ...layout, ...props.style };
+        return;
+      }
+      if (typeof props.style === "string" && props.style.trim()) {
+        const css = Object.entries(layout).map(([k, v]) => `${k.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}:${v}`).join(";");
+        props.style = `${css};${props.style}`;
+        return;
+      }
+      props.style = layout;
     }
     /**
      * 将虚拟渲染节点转换为 HTML 字符串（可直接注入 iframe 或 shadow DOM）
@@ -1765,7 +1799,9 @@ var OpenDesignerPreview = (() => {
       });
       this.selection = new SelectionManager();
       this.controller = new CanvasInteractionController(this.viewport, this.selection);
-      this.overlay = new SelectionOverlayRenderer();
+      this.overlay = new SelectionOverlayRenderer({
+        handleSize: options.handleSize ?? 12
+      });
       this.sandbox = new ComponentSandbox();
       this.stylesPanel = new StylesPanelManager();
       this.store = options.store || new FlatStore();
@@ -1777,9 +1813,7 @@ var OpenDesignerPreview = (() => {
     registerElement(id, rect, element) {
       this.elementRects.set(id, { ...rect });
       if (element) {
-        if (!element.canvasRect) {
-          element.canvasRect = { ...rect };
-        }
+        element.canvasRect = { ...rect };
         this.store.setElement(element);
       }
       this.syncSelectionManager();
@@ -1839,9 +1873,61 @@ var OpenDesignerPreview = (() => {
       return new Map(this.elementRects);
     }
     /**
+     * Hit-test world point against registered rects. Prefers the smallest containing box
+     * so nested children win over their parent.
+     */
+    hitTest(worldPoint) {
+      let bestId = null;
+      let bestArea = Infinity;
+      for (const [id, rect] of this.elementRects.entries()) {
+        if (worldPoint.x >= rect.left && worldPoint.x <= rect.left + rect.width && worldPoint.y >= rect.top && worldPoint.y <= rect.top + rect.height) {
+          const area = Math.max(1, rect.width * rect.height);
+          if (area <= bestArea) {
+            bestArea = area;
+            bestId = id;
+          }
+        }
+      }
+      return bestId;
+    }
+    persistRect(id, rect) {
+      this.elementRects.set(id, { ...rect });
+      const el = this.store.getElement(id);
+      if (el) {
+        el.canvasRect = { ...rect };
+      }
+    }
+    /**
+     * When a parent box moves or its origin shifts, keep descendant world rects in sync
+     * so nested DOM children and hit-testing stay aligned.
+     */
+    translateUnselectedDescendants(movedIds, before) {
+      for (const id of movedIds) {
+        const prev = before.get(id);
+        const next = this.elementRects.get(id);
+        if (!prev || !next) continue;
+        const dx = next.left - prev.left;
+        const dy = next.top - prev.top;
+        if (dx === 0 && dy === 0) continue;
+        for (const desc of this.store.getSubtree(id)) {
+          if (desc.id === id || movedIds.has(desc.id)) continue;
+          const current = this.elementRects.get(desc.id);
+          if (!current) continue;
+          this.persistRect(desc.id, {
+            left: current.left + dx,
+            top: current.top + dy,
+            width: current.width,
+            height: current.height
+          });
+        }
+      }
+      this.syncSelectionManager();
+    }
+    /**
      * 执行拖拽移动 (打通 6 线智能吸附)
      */
     moveSelected(screenPoint) {
+      const before = this.getAllElementRects();
       const candidates = this.getAlignmentCandidates();
       const res = this.controller.updateDrag(screenPoint, {
         candidates,
@@ -1850,12 +1936,12 @@ var OpenDesignerPreview = (() => {
       });
       if (res && res.updatedElements) {
         for (const item of res.updatedElements) {
-          this.elementRects.set(item.id, { ...item.rect });
-          const el = this.store.getElement(item.id);
-          if (el) {
-            el.canvasRect = { ...item.rect };
-          }
+          this.persistRect(item.id, item.rect);
         }
+        this.translateUnselectedDescendants(
+          new Set(res.updatedElements.map((item) => item.id)),
+          before
+        );
       }
       return res;
     }
@@ -1863,6 +1949,7 @@ var OpenDesignerPreview = (() => {
      * 执行 8 向手柄缩放 (打通伴随几何与 6 线吸附)
      */
     resizeSelected(screenPoint) {
+      const before = this.getAllElementRects();
       const candidates = this.getAlignmentCandidates();
       const res = this.controller.updateResize(screenPoint, {
         candidates,
@@ -1871,12 +1958,12 @@ var OpenDesignerPreview = (() => {
       });
       if (res && res.updatedElements) {
         for (const item of res.updatedElements) {
-          this.elementRects.set(item.id, { ...item.rect });
-          const el = this.store.getElement(item.id);
-          if (el) {
-            el.canvasRect = { ...item.rect };
-          }
+          this.persistRect(item.id, item.rect);
         }
+        this.translateUnselectedDescendants(
+          new Set(res.updatedElements.map((item) => item.id)),
+          before
+        );
       }
       return res;
     }
@@ -1894,15 +1981,213 @@ var OpenDesignerPreview = (() => {
       }
       const overlaySvg = this.overlay.renderSvgOverlay(box, guides);
       return [
-        `<div class="opendesigner-canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
-        `  <div class="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;">`,
+        `<div class="opendesigner-canvas-container" data-testid="canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
+        `  <div class="canvas-viewport-layer" data-testid="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;width:100%;height:100%;">`,
         `    ${elementsHtml.join("\n    ")}`,
-        `    ${overlaySvg}`,
+        `    <div class="canvas-overlay-host" data-testid="canvas-overlay" style="pointer-events:none;position:absolute;inset:0;">${overlaySvg}</div>`,
         `  </div>`,
         `</div>`
       ].join("\n");
     }
   };
+
+  // src/client/previewCanvasUx.ts
+  var RESIZE_HANDLES = /* @__PURE__ */ new Set(["nw", "n", "ne", "e", "se", "s", "sw", "w"]);
+  function canvasPointFromEvent(canvasEl, clientX, clientY) {
+    const bounds = canvasEl.getBoundingClientRect();
+    return { x: clientX - bounds.left, y: clientY - bounds.top };
+  }
+  function isTypingTarget(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName;
+    return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || target.isContentEditable;
+  }
+  function applyRectsToDom(canvasEl, panel, store) {
+    for (const [id, rect] of panel.getAllElementRects()) {
+      const node = canvasEl.querySelector(`[data-element-id="${CSS.escape(id)}"]`);
+      if (!node) continue;
+      const parent = store.getParent(id);
+      const parentRect = parent?.canvasRect;
+      const left = parentRect ? rect.left - parentRect.left : rect.left;
+      const top = parentRect ? rect.top - parentRect.top : rect.top;
+      node.style.position = "absolute";
+      node.style.left = `${left}px`;
+      node.style.top = `${top}px`;
+      node.style.width = `${rect.width}px`;
+      node.style.height = `${rect.height}px`;
+      node.style.boxSizing = "border-box";
+    }
+  }
+  function refreshOverlay(canvasEl, panel) {
+    const host = canvasEl.querySelector(".canvas-overlay-host");
+    if (host) {
+      host.innerHTML = panel.overlay.renderSvgOverlay(
+        panel.getSelectedBoundingBox(),
+        panel.controller.getGuides()
+      );
+    }
+    const layer = canvasEl.querySelector(".canvas-viewport-layer");
+    if (layer) {
+      layer.style.transform = panel.viewport.getCssTransform();
+    }
+  }
+  function endInteraction(panel) {
+    const mode = panel.controller.getMode();
+    if (mode === "panning") panel.controller.endPan();
+    else if (mode === "dragging") panel.controller.endDrag();
+    else if (mode === "resizing") panel.controller.endResize();
+  }
+  function bindPreviewCanvasUx(canvasEl, panel, store, hooks) {
+    let spaceDown = false;
+    let pointerId = null;
+    let didMutate = false;
+    let commitLabel = "canvas-gesture";
+    const liveSync = () => {
+      applyRectsToDom(canvasEl, panel, store);
+      refreshOverlay(canvasEl, panel);
+      hooks.onHud();
+    };
+    const onPointerDown = (event) => {
+      if (event.button !== 0 && event.button !== 1) return;
+      const target = event.target;
+      const screen = canvasPointFromEvent(canvasEl, event.clientX, event.clientY);
+      const handleAttr = target?.closest("[data-handle]")?.getAttribute("data-handle");
+      const nodeEl = target?.closest("[data-element-id]");
+      const nodeId = nodeEl?.getAttribute("data-element-id") || panel.hitTest(panel.viewport.toWorld(screen));
+      canvasEl.focus({ preventScroll: true });
+      event.preventDefault();
+      pointerId = event.pointerId;
+      try {
+        canvasEl.setPointerCapture(event.pointerId);
+      } catch {
+      }
+      didMutate = false;
+      if (handleAttr && RESIZE_HANDLES.has(handleAttr) && panel.selection.getSelectedIds().length > 0) {
+        panel.controller.startResize(handleAttr, screen);
+        commitLabel = `resize-${handleAttr}`;
+        liveSync();
+        return;
+      }
+      const panRequested = event.button === 1 || spaceDown || event.altKey || !nodeId;
+      if (panRequested) {
+        if (!nodeId && !event.shiftKey && event.button === 0 && !spaceDown) {
+          panel.selection.clearSelection();
+        }
+        panel.controller.startPan(screen);
+        commitLabel = "pan";
+        liveSync();
+        return;
+      }
+      if (event.shiftKey) {
+        panel.selection.toggleSelect(nodeId);
+      } else {
+        panel.select([nodeId]);
+      }
+      if (panel.selection.getSelectedIds().length > 0) {
+        panel.controller.startDrag(screen);
+        commitLabel = "move";
+      }
+      liveSync();
+    };
+    const onPointerMove = (event) => {
+      if (pointerId === null || event.pointerId !== pointerId) return;
+      const screen = canvasPointFromEvent(canvasEl, event.clientX, event.clientY);
+      const mode = panel.controller.getMode();
+      if (mode === "panning") {
+        panel.controller.updatePan(screen);
+        refreshOverlay(canvasEl, panel);
+        hooks.onHud();
+        return;
+      }
+      if (mode === "dragging") {
+        const res = panel.moveSelected(screen);
+        if (res) didMutate = true;
+        liveSync();
+        return;
+      }
+      if (mode === "resizing") {
+        const res = panel.resizeSelected(screen);
+        if (res) didMutate = true;
+        liveSync();
+      }
+    };
+    const onPointerUp = (event) => {
+      if (pointerId === null || event.pointerId !== pointerId) return;
+      const mode = panel.controller.getMode();
+      endInteraction(panel);
+      pointerId = null;
+      try {
+        canvasEl.releasePointerCapture(event.pointerId);
+      } catch {
+      }
+      liveSync();
+      if (didMutate && (mode === "dragging" || mode === "resizing")) {
+        hooks.onCommit(commitLabel);
+      }
+      didMutate = false;
+    };
+    const onWheel = (event) => {
+      event.preventDefault();
+      const screen = canvasPointFromEvent(canvasEl, event.clientX, event.clientY);
+      panel.viewport.handleWheel({
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        clientX: screen.x,
+        clientY: screen.y,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey
+      });
+      refreshOverlay(canvasEl, panel);
+      hooks.onHud();
+    };
+    const onKeyDown = (event) => {
+      if (event.code === "Space") {
+        spaceDown = true;
+        canvasEl.style.cursor = "grab";
+      }
+      if (isTypingTarget(event.target)) return;
+      if (event.key === "Escape") {
+        panel.selection.clearSelection();
+        liveSync();
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "Delete" || event.key === "Backspace") {
+        const ids = panel.selection.getSelectedIds();
+        if (ids.length === 0) return;
+        event.preventDefault();
+        for (const id of ids) {
+          panel.unregisterElement(id);
+        }
+        panel.selection.clearSelection();
+        hooks.onFullRender();
+        hooks.onCommit("delete-element");
+      }
+    };
+    const onKeyUp = (event) => {
+      if (event.code === "Space") {
+        spaceDown = false;
+        canvasEl.style.cursor = "";
+      }
+    };
+    canvasEl.tabIndex = 0;
+    canvasEl.addEventListener("pointerdown", onPointerDown);
+    canvasEl.addEventListener("pointermove", onPointerMove);
+    canvasEl.addEventListener("pointerup", onPointerUp);
+    canvasEl.addEventListener("pointercancel", onPointerUp);
+    canvasEl.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      canvasEl.removeEventListener("pointerdown", onPointerDown);
+      canvasEl.removeEventListener("pointermove", onPointerMove);
+      canvasEl.removeEventListener("pointerup", onPointerUp);
+      canvasEl.removeEventListener("pointercancel", onPointerUp);
+      canvasEl.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }
 
   // src/client/previewApp.ts
   var CARD_ID = "hero-card";
@@ -1911,6 +2196,10 @@ var OpenDesignerPreview = (() => {
   var BODY_ID = "hero-body";
   var BTN_ID = "primary-btn";
   var BATCH_FILE = "src/agent-batch-demo.txt";
+  var FILL_SWATCHES = ["slate-900", "emerald-600", "indigo-600", "rose-600"];
+  var TEXT_SWATCHES = ["slate-100", "amber-300", "rose-400", "emerald-400"];
+  var RADIUS_VALUES = ["none", "md", "xl", "full"];
+  var PADDING_VALUES = ["2", "4", "6", "8"];
   function seedStore(store) {
     store.setElement({
       id: CARD_ID,
@@ -1976,9 +2265,18 @@ var OpenDesignerPreview = (() => {
     el.props = { ...el.props, className };
     store.setElement(el);
   }
+  function listElementIds(store) {
+    return Object.keys(store.toJSON().byId);
+  }
+  function swatchButtons(prefix, values, kind) {
+    return values.map((value) => {
+      const colorClass = kind === "bg" ? `bg-${value}` : `bg-${value}`;
+      return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" title="${value}"></button>`;
+    }).join("");
+  }
   function mountPreview(root, api = {}) {
     const store = new FlatStore();
-    const panel = new CanvasPanel({ store });
+    const panel = new CanvasPanel({ store, handleSize: 12 });
     let dirty = false;
     let openBatchId = null;
     function syncGeometry() {
@@ -2003,13 +2301,25 @@ var OpenDesignerPreview = (() => {
       </header>
       <div class="od-main">
         <aside class="od-layers" data-testid="layer-tree"></aside>
-        <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
+        <div class="od-canvas-col">
+          <div class="od-canvas-toolbar" data-testid="canvas-toolbar">
+            <button type="button" data-testid="zoom-out" id="od-zoom-out" title="Zoom out">\u2212</button>
+            <span class="od-zoom-label" data-testid="zoom-label" id="od-zoom-label" title="Current zoom">100%</span>
+            <button type="button" data-testid="zoom-in" id="od-zoom-in" title="Zoom in">+</button>
+            <button type="button" data-testid="zoom-reset" id="od-zoom-reset" title="Reset pan and zoom">Reset view</button>
+            <button type="button" data-testid="insert-box" id="od-insert-box" title="Insert a sibling box">Insert box</button>
+            <button type="button" data-testid="delete-element" id="od-delete-element" title="Delete selected">Delete</button>
+            <span class="od-hud" data-testid="canvas-hud" id="od-hud">idle</span>
+          </div>
+          <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
+        </div>
         <aside class="od-styles">
           <div class="od-styles-title">Styles</div>
-          <div id="od-selected" class="od-mono"></div>
+          <div id="od-selected" class="od-mono" data-testid="selected-id"></div>
+          <div id="od-inspector" class="od-inspector" data-testid="styles-inspector"></div>
           <div class="od-actions">
-            <button type="button" data-testid="edit-fill" id="od-edit-fill">Fill emerald</button>
-            <button type="button" data-testid="edit-radius" id="od-edit-radius">Radius xl</button>
+            <button type="button" data-testid="edit-fill" id="od-edit-fill" title="Fill emerald shortcut">Fill emerald</button>
+            <button type="button" data-testid="edit-radius" id="od-edit-radius" title="Radius xl shortcut">Radius xl</button>
             <button type="button" data-testid="ai-merge" id="od-ai-merge">AI merge</button>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
@@ -2040,18 +2350,72 @@ var OpenDesignerPreview = (() => {
     const aiEl = root.querySelector("#od-ai");
     const persistEl = root.querySelector("#od-persist");
     const autosaveEl = root.querySelector("#od-autosave");
-    function render() {
-      syncGeometry();
-      canvasEl.innerHTML = panel.renderHtml();
-      const ids = [CARD_ID, BADGE_ID, TITLE_ID, BODY_ID, BTN_ID];
-      layersEl.innerHTML = ids.map((id) => {
+    const inspectorEl = root.querySelector("#od-inspector");
+    const hudEl = root.querySelector("#od-hud");
+    const zoomLabelEl = root.querySelector("#od-zoom-label");
+    function selectedId() {
+      return panel.selection.getSelectedIds()[0] || "";
+    }
+    function updateHud() {
+      const ids = panel.selection.getSelectedIds();
+      const box = panel.getSelectedBoundingBox();
+      const zoom = Math.round(panel.viewport.getZoom() * 100);
+      const pan = panel.viewport.getPan();
+      const rectText = box ? `${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}\xD7${Math.round(box.height)}` : "none";
+      hudEl.textContent = `${panel.controller.getMode()} \xB7 z${zoom}% \xB7 pan ${Math.round(pan.x)},${Math.round(pan.y)} \xB7 ${ids.join(",") || "none"} \xB7 ${rectText} \xB7 guides ${panel.controller.getGuides().length}`;
+      zoomLabelEl.textContent = `${zoom}%`;
+    }
+    function renderInspector() {
+      const id = selectedId();
+      if (!id) {
+        inspectorEl.innerHTML = `<div class="od-hint">Select an element to edit fill, radius, padding, and text color.</div>`;
+        return;
+      }
+      const className = classNameOf(store, id);
+      const parsed = StylesPanelManager.parseClasses(className);
+      const sections = StylesPanelManager.buildPanelSections(className);
+      const wanted = /* @__PURE__ */ new Set(["backgroundColor", "borderRadius", "padding", "textColor"]);
+      const present = sections.flatMap((section) => section.controls).filter((control) => wanted.has(control.name));
+      inspectorEl.innerHTML = `
+      <div class="od-field">
+        <div class="od-field-label">Fill ${parsed.backgroundColor || ""}</div>
+        <div class="od-swatches">${swatchButtons("style-fill", FILL_SWATCHES, "bg")}</div>
+      </div>
+      <div class="od-field">
+        <div class="od-field-label">Radius ${parsed.borderRadius || ""}</div>
+        <div class="od-chip-row">${RADIUS_VALUES.map((value) => `<button type="button" data-testid="style-radius-${value}" data-radius="${value}">${value}</button>`).join("")}</div>
+      </div>
+      <div class="od-field">
+        <div class="od-field-label">Padding ${parsed.padding || parsed.paddingX || ""}</div>
+        <div class="od-chip-row">${PADDING_VALUES.map((value) => `<button type="button" data-testid="style-padding-${value}" data-padding="${value}">p-${value}</button>`).join("")}</div>
+      </div>
+      <div class="od-field">
+        <div class="od-field-label">Text color ${parsed.textColor || ""}</div>
+        <div class="od-swatches">${swatchButtons("style-text", TEXT_SWATCHES, "text")}</div>
+      </div>
+      <div class="od-hint">${present.map((control) => control.name).join(" \xB7 ")}</div>
+    `;
+    }
+    function renderLayers() {
+      const ids = listElementIds(store);
+      layersEl.innerHTML = `<div class="od-styles-title">Layers</div>` + ids.map((id) => {
         const el = store.getElement(id);
-        const selected = panel.selection.getSelectedIds().includes(id);
-        return `<button type="button" class="od-layer${selected ? " is-selected" : ""}" data-id="${id}">${el?.tag} ${id}</button>`;
+        const selected = panel.selection.isSelected(id);
+        return `<button type="button" class="od-layer${selected ? " is-selected" : ""}" data-testid="layer-${id}" data-id="${id}">${el?.tag || "node"} ${id}</button>`;
       }).join("");
-      const selectedId = panel.selection.getSelectedIds()[0] || CARD_ID;
-      selectedEl.textContent = selectedId;
-      classEl.textContent = classNameOf(store, selectedId);
+    }
+    function render(options = {}) {
+      const selected = panel.selection.getSelectedIds();
+      syncGeometry();
+      if (selected.length) panel.select(selected.filter((id2) => store.getElement(id2)));
+      canvasEl.innerHTML = panel.renderHtml();
+      renderLayers();
+      renderInspector();
+      const id = selectedId();
+      selectedEl.textContent = id || "(none)";
+      classEl.textContent = id ? classNameOf(store, id) : "";
+      updateHud();
+      if (options.preserveViewport) refreshOverlay(canvasEl, panel);
     }
     async function refreshStatus() {
       if (!api.getStatus) return;
@@ -2082,6 +2446,48 @@ var OpenDesignerPreview = (() => {
       await callTool("autosave");
       dirty = false;
     }
+    function applyStyle(property, value, label) {
+      const id = selectedId();
+      if (!id) return;
+      const next = StylesPanelManager.applyPropertyChange(classNameOf(store, id), property, value);
+      setClassName(store, id, next);
+      render();
+      void checkpointAndAutosave(label);
+    }
+    function insertBox() {
+      let n = 1;
+      while (store.getElement(`insert-box-${n}`)) n += 1;
+      const id = `insert-box-${n}`;
+      const left = 470 + (n - 1) * 16;
+      store.setElement({
+        id,
+        type: "element",
+        tag: "div",
+        props: {
+          className: "rounded-lg bg-amber-400 text-slate-900 text-xs font-semibold px-3 py-2 shadow-md",
+          "data-testid": `node-${id}`
+        },
+        textContent: `Insert ${n}`,
+        canvasRect: { left, top: 48, width: 140, height: 88 }
+      });
+      panel.select([id]);
+      render();
+      void checkpointAndAutosave("insert-box");
+    }
+    function deleteSelected() {
+      const ids = panel.selection.getSelectedIds();
+      if (ids.length === 0) return;
+      for (const id of ids) panel.unregisterElement(id);
+      panel.selection.clearSelection();
+      render();
+      void checkpointAndAutosave("delete-element");
+    }
+    function zoomBy(factor) {
+      const bounds = canvasEl.getBoundingClientRect();
+      panel.viewport.zoomAt({ x: bounds.width / 2, y: bounds.height / 2 }, factor);
+      refreshOverlay(canvasEl, panel);
+      updateHud();
+    }
     layersEl.addEventListener("click", (event) => {
       const target = event.target;
       const id = target.getAttribute("data-id");
@@ -2089,15 +2495,23 @@ var OpenDesignerPreview = (() => {
       panel.select([id]);
       render();
     });
+    inspectorEl.addEventListener("click", (event) => {
+      const target = event.target;
+      const fill = target.getAttribute("data-testid")?.startsWith("style-fill-") ? target.getAttribute("data-value") : null;
+      const radius = target.getAttribute("data-radius");
+      const padding = target.getAttribute("data-padding");
+      const text = target.getAttribute("data-testid")?.startsWith("style-text-") ? target.getAttribute("data-value") : null;
+      if (fill) applyStyle("backgroundColor", fill, `fill-${fill}`);
+      else if (radius) applyStyle("borderRadius", radius, `radius-${radius}`);
+      else if (padding) applyStyle("padding", padding, `padding-${padding}`);
+      else if (text) applyStyle("textColor", text, `text-${text}`);
+    });
     root.querySelector("#od-edit-fill").addEventListener("click", () => {
-      const id = panel.selection.getSelectedIds()[0] || CARD_ID;
-      const next = StylesPanelManager.applyPropertyChange(classNameOf(store, id), "backgroundColor", "emerald-600");
-      setClassName(store, id, next);
-      render();
-      void checkpointAndAutosave("fill-emerald");
+      applyStyle("backgroundColor", "emerald-600", "fill-emerald");
     });
     root.querySelector("#od-edit-radius").addEventListener("click", () => {
-      const id = panel.selection.getSelectedIds()[0] || CARD_ID;
+      const id = selectedId() || CARD_ID;
+      if (!selectedId()) panel.select([id]);
       const next = mergeTailwindClasses(classNameOf(store, id), "rounded-xl");
       setClassName(store, id, next);
       render();
@@ -2107,7 +2521,8 @@ var OpenDesignerPreview = (() => {
       const result = await callTool("rewind");
       if (result.success && result.store) {
         store.fromJSON(result.store);
-        panel.select([CARD_ID]);
+        const ids = listElementIds(store);
+        panel.select(ids.includes(CARD_ID) ? [CARD_ID] : ids.slice(0, 1));
         render();
       }
     });
@@ -2148,7 +2563,7 @@ var OpenDesignerPreview = (() => {
         aiEl.textContent = "AI merge endpoint is not attached.";
         return;
       }
-      const id = panel.selection.getSelectedIds()[0] || BTN_ID;
+      const id = selectedId() || BTN_ID;
       const source = `<button className="${classNameOf(store, id)}">${store.getElement(id)?.textContent || ""}</button>`;
       const result = await api.applyAiMerge(source, "Add shadow-lg to the button className");
       if (result.success && result.mergedCode) {
@@ -2160,6 +2575,29 @@ ${result.mergedCode}`;
         void checkpointAndAutosave("ai-merge");
       } else {
         aiEl.textContent = result.error || "AI merge failed";
+      }
+    });
+    root.querySelector("#od-insert-box").addEventListener("click", () => insertBox());
+    root.querySelector("#od-delete-element").addEventListener("click", () => deleteSelected());
+    root.querySelector("#od-zoom-in").addEventListener("click", () => zoomBy(1.15));
+    root.querySelector("#od-zoom-out").addEventListener("click", () => zoomBy(1 / 1.15));
+    root.querySelector("#od-zoom-reset").addEventListener("click", () => {
+      panel.viewport.reset();
+      refreshOverlay(canvasEl, panel);
+      updateHud();
+    });
+    bindPreviewCanvasUx(canvasEl, panel, store, {
+      onCommit: (label) => {
+        void checkpointAndAutosave(label);
+      },
+      onFullRender: () => render(),
+      onHud: () => {
+        renderLayers();
+        renderInspector();
+        const id = selectedId();
+        selectedEl.textContent = id || "(none)";
+        classEl.textContent = id ? classNameOf(store, id) : "";
+        updateHud();
       }
     });
     window.setInterval(() => {

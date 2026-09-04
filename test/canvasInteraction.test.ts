@@ -266,4 +266,33 @@ describe("Client - ComponentSandbox & Next.js Runtime Shims", () => {
     assert.ok(html.includes('data-element-id="link_node"'));
     assert.ok(html.includes("Go to Dashboard"));
   });
+
+  it("should position nested canvasRect nodes as parent-relative absolute boxes", () => {
+    const store = new FlatStore();
+    store.setElement({
+      id: "card",
+      type: "element",
+      tag: "article",
+      props: { className: "card" },
+      canvasRect: { left: 60, top: 40, width: 200, height: 100 }
+    });
+    store.setElement({
+      id: "title",
+      type: "element",
+      tag: "h2",
+      props: { className: "title" },
+      textContent: "Hello",
+      canvasRect: { left: 76, top: 56, width: 120, height: 24 }
+    });
+    store.attachChild("card", "title");
+
+    const sandbox = new ComponentSandbox();
+    const html = sandbox.renderToHtml(store, "card");
+    assert.ok(html.includes("left:60px"));
+    assert.ok(html.includes("top:40px"));
+    assert.ok(html.includes("left:16px"));
+    assert.ok(html.includes("top:16px"));
+    assert.ok(html.includes('data-testid="node-title"'));
+    assert.ok(html.includes("Hello"));
+  });
 });
