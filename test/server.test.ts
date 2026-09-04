@@ -49,6 +49,17 @@ describe("Server - OpenDesignerService & Persistence", () => {
     assert.equal(loaded, true);
     assert.equal(freshService.store.getElement("node_save_test")?.tag, "header");
   });
+
+  it("should instantiate and expose AIGateway with configured provider", () => {
+    const service = new OpenDesignerService({
+      modelProvider: "deepseek",
+      aiConfig: { mockMode: true }
+    });
+    assert.ok(service.aiGateway);
+    assert.equal(service.aiGateway.provider, "deepseek");
+    assert.equal(service.aiGateway.model, "deepseek-chat");
+    assert.equal(service.aiGateway.mockMode, true);
+  });
 });
 
 describe("Server - ClaimRegistry Concurrency Lock Engine", () => {

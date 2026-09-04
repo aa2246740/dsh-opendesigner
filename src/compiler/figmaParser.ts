@@ -77,6 +77,8 @@ export interface FigmaParseResult {
   elements: FEElement[];
   jsx: string;
   error?: string;
+  scene?: SceneIndex;
+  nodes?: FigmaNode[];
 }
 
 /**
@@ -263,11 +265,14 @@ export class KiwiWriter {
 /**
  * 调色板映射：将 Figma RGB 浮点色彩 (0-1) 映射为最贴合的 Tailwind 语义类名或 hex
  */
-export function figmaColorToTailwind(color: FigmaColor, prefix: "bg" | "text" | "border" = "bg"): string {
-  const r = Math.round(color.r * 255);
-  const g = Math.round(color.g * 255);
-  const b = Math.round(color.b * 255);
-  const a = color.a !== undefined ? color.a : 1;
+export function figmaColorToTailwind(
+  color: FigmaColor,
+  prefix: "bg" | "text" | "border" | "from" | "to" = "bg"
+): string {
+  const r = Math.round(Math.max(0, Math.min(1, color.r)) * 255);
+  const g = Math.round(Math.max(0, Math.min(1, color.g)) * 255);
+  const b = Math.round(Math.max(0, Math.min(1, color.b)) * 255);
+  const a = color.a !== undefined ? Math.max(0, Math.min(1, color.a)) : 1;
   const opacitySuffix = a < 0.99 && a > 0 ? `/${Math.round(a * 100)}` : "";
 
   // 基础常用预设映射
@@ -482,6 +487,22 @@ export function figmaNodeToTailwindClasses(node: FigmaNode): string[] {
       else if (node.textAlignHorizontal === "RIGHT") classes.push("text-right");
     }
 
+    if (node.lineHeight) {
+      const lh = node.lineHeight;
+      const lhMap: Record<number, string> = {
+        12: "leading-3",
+        16: "leading-4",
+        20: "leading-5",
+        24: "leading-6",
+        28: "leading-7",
+        32: "leading-8",
+        36: "leading-9",
+        40: "leading-10"
+      };
+      if (lhMap[lh]) classes.push(lhMap[lh]);
+      else classes.push(`leading-[${lh}px]`);
+    }
+
     // 文字颜色提取自 fills
     if (node.fills && node.fills.length > 0) {
       const textFill = node.fills.find((f) => f.type === "SOLID" && f.color);
@@ -553,11 +574,39 @@ export function packKiwiBinary(nodes: FigmaNode[], magic: "figma" | "kiwi" = "fi
     INSTANCE: 7
   };
 
+  const primaryMapInverse: Record<string, number> = {
+    MIN: 1,
+    CENTER: 2,
+    MAX: 3,
+    SPACE_BETWEEN: 4
+  };
+
+  const counterMapInverse: Record<string, number> = {
+    MIN: 1,
+    CENTER: 2,
+    MAX: 3,
+    BASELINE: 4,
+    STRETCH: 5
+  };
+
+  const textAlignMapInverse: Record<string, number> = {
+    LEFT: 1,
+    CENTER: 2,
+    RIGHT: 3,
+    JUSTIFIED: 4
+  };
+
   for (const node of nodes) {
     writer.writeByte(1); // 节点起始标记
     writer.writeString(node.id || "");
     writer.writeString(node.name || "");
     writer.writeByte(typeMapInverse[node.type] || 1);
+
+    // 几何尺寸 x, y, width, height
+    writer.writeFloat32(node.x || 0);
+    writer.writeFloat32(node.y || 0);
+    writer.writeFloat32(node.width || 0);
+    writer.writeFloat32(node.height || 0);
 
     // AutoLayout 标志与间距
     let autoMode = 0;
@@ -571,6 +620,8 @@ export function packKiwiBinary(nodes: FigmaNode[], magic: "figma" | "kiwi" = "fi
       writer.writeVarUint(node.paddingRight || 0);
       writer.writeVarUint(node.paddingTop || 0);
       writer.writeVarUint(node.paddingBottom || 0);
+      writer.writeByte(primaryMapInverse[node.primaryAxisAlignItems!] || 0);
+      writer.writeByte(counterMapInverse[node.counterAxisAlignItems!] || 0);
     }
 
     // 色彩 Fill
@@ -585,15 +636,42 @@ export function packKiwiBinary(nodes: FigmaNode[], magic: "figma" | "kiwi" = "fi
       writer.writeByte(0);
     }
 
+    // 边框 Stroke
+    const strokePaint = node.strokes?.find((s) => s.type === "SOLID" && s.color);
+    if (strokePaint?.color && (node.strokeWeight ?? 0) > 0) {
+      writer.writeByte(1);
+      writer.writeVarUint(node.strokeWeight || 1);
+      writer.writeFloat32(strokePaint.color.r);
+      writer.writeFloat32(strokePaint.color.g);
+      writer.writeFloat32(strokePaint.color.b);
+      writer.writeFloat32(strokePaint.color.a ?? 1);
+    } else {
+      writer.writeByte(0);
+    }
+
     // 圆角
     writer.writeVarUint(node.cornerRadius || 0);
 
-    // 文本属性
+    // 阴影 Effect
+    const shadow = node.effects?.find((e) => e.type === "DROP_SHADOW" && e.visible !== false);
+    if (shadow) {
+      writer.writeByte(1);
+      writer.writeVarUint(shadow.radius || 0);
+    } else {
+      writer.writeByte(0);
+    }
+
+    // 不透明度 Opacity
+    writer.writeFloat32(node.opacity !== undefined ? node.opacity : 1.0);
+
+    // 文本/内容字符串
+    writer.writeString(node.characters || "");
     if (node.type === "TEXT") {
-      writer.writeString(node.characters || "");
       writer.writeVarUint(node.fontSize || 16);
       const fw = typeof node.fontWeight === "number" ? node.fontWeight : 400;
       writer.writeVarUint(fw);
+      writer.writeByte(textAlignMapInverse[node.textAlignHorizontal!] || 0);
+      writer.writeVarUint(node.lineHeight || 0);
     }
 
     // 可选 parentId
@@ -616,6 +694,28 @@ export function unpackKiwiBinary(buffer: Uint8Array, options: { requireHeader?: 
 
   const nodes: FigmaNode[] = [];
 
+  const primaryMap: Record<number, FigmaNode["primaryAxisAlignItems"]> = {
+    1: "MIN",
+    2: "CENTER",
+    3: "MAX",
+    4: "SPACE_BETWEEN"
+  };
+
+  const counterMap: Record<number, FigmaNode["counterAxisAlignItems"]> = {
+    1: "MIN",
+    2: "CENTER",
+    3: "MAX",
+    4: "BASELINE",
+    5: "STRETCH"
+  };
+
+  const textAlignMap: Record<number, FigmaNode["textAlignHorizontal"]> = {
+    1: "LEFT",
+    2: "CENTER",
+    3: "RIGHT",
+    4: "JUSTIFIED"
+  };
+
   while (!reader.isEOF()) {
     try {
       const typeCode = reader.readByte();
@@ -636,11 +736,24 @@ export function unpackKiwiBinary(buffer: Uint8Array, options: { requireHeader?: 
       };
       const nodeType = typeMap[typeTag] || "FRAME";
 
+      // 读取几何尺寸
+      const x = reader.readFloat32();
+      const y = reader.readFloat32();
+      const width = reader.readFloat32();
+      const height = reader.readFloat32();
+
       const node: FigmaNode = {
         id,
         name,
         type: nodeType
       };
+
+      if (x || y) {
+        node.x = x;
+        node.y = y;
+      }
+      if (width) node.width = width;
+      if (height) node.height = height;
 
       // 读取 AutoLayout 标志
       const autoLayoutMode = reader.readByte();
@@ -653,6 +766,10 @@ export function unpackKiwiBinary(buffer: Uint8Array, options: { requireHeader?: 
         node.paddingRight = reader.readVarUint();
         node.paddingTop = reader.readVarUint();
         node.paddingBottom = reader.readVarUint();
+        const primTag = reader.readByte();
+        if (primaryMap[primTag]) node.primaryAxisAlignItems = primaryMap[primTag];
+        const counterTag = reader.readByte();
+        if (counterMap[counterTag]) node.counterAxisAlignItems = counterMap[counterTag];
       }
 
       // 读取色彩 Fill
@@ -665,14 +782,48 @@ export function unpackKiwiBinary(buffer: Uint8Array, options: { requireHeader?: 
         node.fills = [{ type: "SOLID", color: { r, g, b, a } }];
       }
 
+      // 读取边框 Stroke
+      const hasStroke = reader.readByte();
+      if (hasStroke) {
+        const strokeWeight = reader.readVarUint();
+        const r = reader.readFloat32();
+        const g = reader.readFloat32();
+        const b = reader.readFloat32();
+        const a = reader.readFloat32();
+        node.strokeWeight = strokeWeight;
+        node.strokes = [{ type: "SOLID", color: { r, g, b, a } }];
+      }
+
       // 读取圆角
       node.cornerRadius = reader.readVarUint();
 
-      // 若为文本节点，读取 characters
+      // 读取阴影 Effect
+      const hasShadow = reader.readByte();
+      if (hasShadow) {
+        const radius = reader.readVarUint();
+        node.effects = [{ type: "DROP_SHADOW", radius, visible: true }];
+      }
+
+      // 读取不透明度 Opacity
+      const opacity = reader.readFloat32();
+      if (opacity < 1.0 && opacity >= 0) {
+        node.opacity = opacity;
+      }
+
+      // 读取 characters
+      const chars = reader.readString();
+      if (chars) {
+        node.characters = chars;
+      }
+
+      // 若为文本节点，读取排版
       if (node.type === "TEXT") {
-        node.characters = reader.readString();
         node.fontSize = reader.readVarUint();
         node.fontWeight = reader.readVarUint();
+        const alignTag = reader.readByte();
+        if (textAlignMap[alignTag]) node.textAlignHorizontal = textAlignMap[alignTag];
+        const lh = reader.readVarUint();
+        if (lh > 0) node.lineHeight = lh;
       }
 
       // 若数据流后续包含 parentId 字符串，则提取
@@ -722,6 +873,10 @@ export function sceneToFlatStore(
     else if (fNode.name.toLowerCase().includes("button")) tag = "button";
     else if (fNode.name.toLowerCase().includes("input")) tag = "input";
     else if (fNode.name.toLowerCase().includes("card")) tag = "section";
+    else if (fNode.name.toLowerCase().includes("nav")) tag = "nav";
+    else if (fNode.name.toLowerCase().includes("header")) tag = "header";
+    else if (fNode.name.toLowerCase().includes("footer")) tag = "footer";
+    else if (fNode.name.toLowerCase().includes("aside")) tag = "aside";
 
     const el: FEElement = {
       id: fNode.id,
@@ -732,6 +887,15 @@ export function sceneToFlatStore(
       },
       textContent: fNode.characters
     };
+
+    if (fNode.width && fNode.height) {
+      el.canvasRect = {
+        left: fNode.x || 0,
+        top: fNode.y || 0,
+        width: fNode.width,
+        height: fNode.height
+      };
+    }
 
     elements.push(el);
 
@@ -932,7 +1096,9 @@ export function parseFigmaClipboard(input: Uint8Array | string): FigmaParseResul
       success: true,
       rootId: converted.rootId,
       elements: converted.elements,
-      jsx: converted.jsx
+      jsx: converted.jsx,
+      scene,
+      nodes
     };
   } catch (err: any) {
     return {
@@ -976,13 +1142,19 @@ export function figmaToReact19(
     }
     rawElements = parsed.elements;
     rootId = parsed.rootId;
-    const nodes: FigmaNode[] = rawElements.map((el) => ({
-      id: el.id,
-      name: el.tag,
-      type: el.tag === "p" ? "TEXT" : "FRAME",
-      characters: el.textContent
-    }));
-    scene = buildSceneIndex(nodes);
+    if (parsed.scene) {
+      scene = parsed.scene;
+    } else if (parsed.nodes) {
+      scene = buildSceneIndex(parsed.nodes);
+    } else {
+      const nodes: FigmaNode[] = rawElements.map((el) => ({
+        id: el.id,
+        name: el.tag,
+        type: el.tag === "p" ? "TEXT" : "FRAME",
+        characters: el.textContent
+      }));
+      scene = buildSceneIndex(nodes);
+    }
   } else if ("nodeMap" in input && "childrenMap" in input) {
     scene = input;
     const res = sceneToFlatStore(scene);
@@ -992,13 +1164,19 @@ export function figmaToReact19(
     const p = input as FigmaParseResult;
     rawElements = p.elements;
     rootId = p.rootId;
-    const nodes: FigmaNode[] = rawElements.map((el) => ({
-      id: el.id,
-      name: el.tag,
-      type: el.tag === "p" ? "TEXT" : "FRAME",
-      characters: el.textContent
-    }));
-    scene = buildSceneIndex(nodes);
+    if (p.scene) {
+      scene = p.scene;
+    } else if (p.nodes) {
+      scene = buildSceneIndex(p.nodes);
+    } else {
+      const nodes: FigmaNode[] = rawElements.map((el) => ({
+        id: el.id,
+        name: el.tag,
+        type: el.tag === "p" ? "TEXT" : "FRAME",
+        characters: el.textContent
+      }));
+      scene = buildSceneIndex(nodes);
+    }
   } else if (Array.isArray(input)) {
     scene = buildSceneIndex(input);
     const res = sceneToFlatStore(scene);
@@ -1035,7 +1213,9 @@ export function figmaToReact19(
     return text
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+      .replace(/>/g, "&gt;")
+      .replace(/\{/g, "&#123;")
+      .replace(/\}/g, "&#125;");
   }
 
   function renderJsxNode(nodeId: string, indent: number = 2): string {
@@ -1057,6 +1237,8 @@ export function figmaToReact19(
     else if (node.name.toLowerCase().includes("card")) tag = "section";
     else if (node.name.toLowerCase().includes("nav")) tag = "nav";
     else if (node.name.toLowerCase().includes("header")) tag = "header";
+    else if (node.name.toLowerCase().includes("footer")) tag = "footer";
+    else if (node.name.toLowerCase().includes("aside")) tag = "aside";
 
     if (tag === "input") {
       return `${spaces}<input${classAttr} />`;

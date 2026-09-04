@@ -226,4 +226,55 @@ describe("Server - Decoupled Multi-Model AI Gateway", () => {
     assert.equal(res.success, false);
     assert.ok(res.error?.includes("HTTP 429"));
   });
+
+  it("should parse direct JSON array patch and handle curly braces in reasoning prefix", async () => {
+    const mockContent = `Let's inspect element {id: "main_nav", type: "container"}:
+Now we apply the edits:
+\`\`\`json
+[
+  {
+    "old_string": "bg-red-500",
+    "new_string": "bg-emerald-600",
+    "replace_all": false
+  }
+]
+\`\`\`
+Hope this helps!`;
+
+    const mockFetch = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: mockContent,
+                reasoning_content: "Checking theme colors {bg: 'emerald'}..."
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+
+    const gateway = new AIGateway({
+      provider: "deepseek",
+      model: "deepseek-reasoner",
+      apiKey: "sk-mock-key",
+      fetchFn: mockFetch as any,
+      mockMode: false
+    });
+
+    const res = await gateway.requestEdits({
+      sourceCode: `export const Nav = () => <div className="bg-red-500" />;`,
+      instruction: "change to emerald"
+    });
+
+    assert.equal(res.success, true);
+    assert.ok(res.edits);
+    assert.equal(res.edits.length, 1);
+    assert.equal(res.edits[0].old_string, "bg-red-500");
+    assert.equal(res.edits[0].new_string, "bg-emerald-600");
+    assert.ok(res.reasoning?.includes("Checking theme colors"));
+  });
 });

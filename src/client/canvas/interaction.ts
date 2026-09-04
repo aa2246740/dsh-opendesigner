@@ -133,6 +133,7 @@ export class CanvasInteractionController {
     } = {}
   ): {
     newBox: Rect;
+    updatedElements: { id: string; rect: Rect }[];
     guides: SnapGuide[];
     snapped: boolean;
   } | null {
@@ -157,6 +158,7 @@ export class CanvasInteractionController {
     this.emitGuides(moveRes.guides);
     return {
       newBox: moveRes.newBox,
+      updatedElements: moveRes.updatedElements,
       guides: moveRes.guides,
       snapped: moveRes.snapped
     };
@@ -197,6 +199,7 @@ export class CanvasInteractionController {
     } = {}
   ): {
     newBox: Rect;
+    updatedElements: { id: string; rect: Rect }[];
     guides: SnapGuide[];
     snapped: boolean;
   } | null {
@@ -209,6 +212,7 @@ export class CanvasInteractionController {
     this.emitGuides(resizeRes.guides);
     return {
       newBox: resizeRes.newBox,
+      updatedElements: resizeRes.updatedElements,
       guides: resizeRes.guides,
       snapped: resizeRes.snapped
     };

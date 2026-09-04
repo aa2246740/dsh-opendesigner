@@ -53,8 +53,11 @@ export class CanvasPanel {
    * 同步或注册图元世界几何矩形
    */
   public registerElement(id: string, rect: Rect, element?: FEElement): void {
-    this.elementRects.set(id, rect);
+    this.elementRects.set(id, { ...rect });
     if (element) {
+      if (!element.canvasRect) {
+        element.canvasRect = { ...rect };
+      }
       this.store.setElement(element);
     }
     this.syncSelectionManager();
@@ -108,10 +111,24 @@ export class CanvasPanel {
     return this.selection.getBoundingBox();
   }
 
+  public getElementRect(id: string): Rect | undefined {
+    const r = this.elementRects.get(id);
+    return r ? { ...r } : undefined;
+  }
+
+  public getAllElementRects(): Map<string, Rect> {
+    return new Map(this.elementRects);
+  }
+
   /**
    * 执行拖拽移动 (打通 6 线智能吸附)
    */
-  public moveSelected(screenPoint: Point): { newBox: Rect; guides: SnapGuide[]; snapped: boolean } | null {
+  public moveSelected(screenPoint: Point): {
+    newBox: Rect;
+    updatedElements: { id: string; rect: Rect }[];
+    guides: SnapGuide[];
+    snapped: boolean;
+  } | null {
     const candidates = this.getAlignmentCandidates();
     const res = this.controller.updateDrag(screenPoint, {
       candidates,
@@ -119,15 +136,12 @@ export class CanvasPanel {
       enableSnapping: true
     });
 
-    if (res) {
-      // 保持内部 elementRects 与移动后一致
-      const currentBox = this.selection.getBoundingBox();
-      if (currentBox) {
-        for (const id of this.selection.getSelectedIds()) {
-          const r = this.elementRects.get(id);
-          if (r) {
-            // 已在 SelectionManager 内部平移，此处同步回 map
-          }
+    if (res && res.updatedElements) {
+      for (const item of res.updatedElements) {
+        this.elementRects.set(item.id, { ...item.rect });
+        const el = this.store.getElement(item.id);
+        if (el) {
+          el.canvasRect = { ...item.rect };
         }
       }
     }
@@ -138,13 +152,30 @@ export class CanvasPanel {
   /**
    * 执行 8 向手柄缩放 (打通伴随几何与 6 线吸附)
    */
-  public resizeSelected(screenPoint: Point): { newBox: Rect; guides: SnapGuide[]; snapped: boolean } | null {
+  public resizeSelected(screenPoint: Point): {
+    newBox: Rect;
+    updatedElements: { id: string; rect: Rect }[];
+    guides: SnapGuide[];
+    snapped: boolean;
+  } | null {
     const candidates = this.getAlignmentCandidates();
-    return this.controller.updateResize(screenPoint, {
+    const res = this.controller.updateResize(screenPoint, {
       candidates,
       snapThreshold: this.snapThreshold,
       enableSnapping: true
     });
+
+    if (res && res.updatedElements) {
+      for (const item of res.updatedElements) {
+        this.elementRects.set(item.id, { ...item.rect });
+        const el = this.store.getElement(item.id);
+        if (el) {
+          el.canvasRect = { ...item.rect };
+        }
+      }
+    }
+
+    return res;
   }
 
   /**

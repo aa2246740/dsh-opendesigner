@@ -168,6 +168,7 @@ export class AIGateway {
 
     return {
       success: false,
+      mergedCode: undefined,
       error: `AI Merge failed after ${attempts} attempts: ${lastError}`,
       attempts
     };
@@ -184,6 +185,7 @@ export class AIGateway {
     edits?: CodePatchEdit[];
     usage?: any;
     rawOutput?: string;
+    reasoning?: string;
     error?: string;
   }> {
     // 离线/测试模拟模式
@@ -272,10 +274,11 @@ export class AIGateway {
       try {
         const rawArgs = call.function.arguments;
         const parsed = typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs;
-        if (Array.isArray(parsed.edits)) {
+        const editsList = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.edits) ? parsed.edits : null;
+        if (editsList) {
           return {
             success: true,
-            edits: parsed.edits,
+            edits: editsList,
             usage: json.usage,
             rawOutput: typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs),
             reasoning
@@ -286,30 +289,75 @@ export class AIGateway {
       }
     }
 
-    // 2. 尝试从正文解析 JSON (优先提取 ```json ... ``` 代码块)
-    let jsonContent = "";
-    const codeBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (codeBlockMatch) {
-      jsonContent = codeBlockMatch[1].trim();
-    } else {
-      const match = content.match(/\{[\s\S]*\}/);
-      if (match) jsonContent = match[0].trim();
+    // 2. 尝试从正文解析 JSON
+    // 候选字符串列表：优先提取 Markdown 代码块，其次提取平衡的 JSON 对象或数组
+    const candidateJsonStrings: string[] = [];
+
+    const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/g;
+    let cbMatch: RegExpExecArray | null;
+    while ((cbMatch = codeBlockRegex.exec(content)) !== null) {
+      if (cbMatch[1]?.trim()) candidateJsonStrings.push(cbMatch[1].trim());
     }
 
-    if (jsonContent) {
+    if (candidateJsonStrings.length === 0) {
+      // 尝试提取 {"edits": ...}
+      const editsObjIdx = content.indexOf('{"edits"');
+      if (editsObjIdx !== -1) {
+        const slice = content.slice(editsObjIdx);
+        let depth = 0;
+        let endIdx = -1;
+        for (let i = 0; i < slice.length; i++) {
+          if (slice[i] === "{") depth++;
+          else if (slice[i] === "}") {
+            depth--;
+            if (depth === 0) {
+              endIdx = i + 1;
+              break;
+            }
+          }
+        }
+        if (endIdx !== -1) candidateJsonStrings.push(slice.slice(0, endIdx));
+      }
+
+      // 尝试提取 [{"old_string": ...}]
+      const arrayIdx = content.search(/\[\s*\{/);
+      if (arrayIdx !== -1) {
+        const slice = content.slice(arrayIdx);
+        let depth = 0;
+        let endIdx = -1;
+        for (let i = 0; i < slice.length; i++) {
+          if (slice[i] === "[") depth++;
+          else if (slice[i] === "]") {
+            depth--;
+            if (depth === 0) {
+              endIdx = i + 1;
+              break;
+            }
+          }
+        }
+        if (endIdx !== -1) candidateJsonStrings.push(slice.slice(0, endIdx));
+      }
+
+      // 兜底全量括号匹配
+      const fallbackMatch = content.match(/\{[\s\S]*\}/);
+      if (fallbackMatch) candidateJsonStrings.push(fallbackMatch[0].trim());
+    }
+
+    for (const jsonStr of candidateJsonStrings) {
       try {
-        const parsed = JSON.parse(jsonContent);
-        if (Array.isArray(parsed.edits)) {
+        const parsed = JSON.parse(jsonStr);
+        const editsList = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.edits) ? parsed.edits : null;
+        if (editsList) {
           return {
             success: true,
-            edits: parsed.edits,
+            edits: editsList,
             usage: json.usage,
             rawOutput: content,
             reasoning
           };
         }
       } catch {
-        // ignore
+        // 继续尝试下一个候选
       }
     }
 

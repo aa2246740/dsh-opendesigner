@@ -348,4 +348,149 @@ describe("Compiler - Figma Kiwi Binary Protocol & Tailwind Mapping", () => {
     assert.ok(store.elements.has("child_node"));
     assert.deepEqual(store.childrenMap.get("parent_node"), ["child_node"]);
   });
+
+  it("should convert Kiwi binary buffer to React 19 component preserving hierarchy and styling", () => {
+    const cardNodes: FigmaNode[] = [
+      {
+        id: "checkout_modal",
+        name: "CheckoutCard",
+        type: "FRAME",
+        stackMode: "VERTICAL",
+        itemSpacing: 16,
+        paddingLeft: 24,
+        paddingRight: 24,
+        paddingTop: 24,
+        paddingBottom: 24,
+        cornerRadius: 16,
+        fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1, a: 1 } }]
+      },
+      {
+        id: "modal_title",
+        name: "Title",
+        type: "TEXT",
+        parentId: "checkout_modal",
+        characters: "Payment Method",
+        fontSize: 20,
+        fontWeight: 700
+      },
+      {
+        id: "confirm_button",
+        name: "ConfirmButton",
+        type: "FRAME",
+        parentId: "checkout_modal",
+        cornerRadius: 8,
+        fills: [{ type: "SOLID", color: { r: 0.1, g: 0.5, b: 0.9, a: 1 } }],
+        characters: "Pay Now"
+      }
+    ];
+
+    const binary = packKiwiBinary(cardNodes);
+    const reactRes = figmaToReact19(binary, { exportType: "named" });
+
+    // 验证根节点名称正确提取并转换为 PascalCase 组件名
+    assert.equal(reactRes.componentName, "CheckoutCard");
+    assert.equal(reactRes.rootId, "checkout_modal");
+    assert.equal(reactRes.elements.length, 3);
+
+    // 验证 JSX 层次结构完整嵌套，样式未丢失
+    assert.ok(reactRes.code.includes("export function CheckoutCard() {"));
+    assert.ok(reactRes.code.includes("<section className="));
+    assert.ok(reactRes.code.includes("flex-col"));
+    assert.ok(reactRes.code.includes("gap-4"));
+    assert.ok(reactRes.code.includes("p-6"));
+    assert.ok(reactRes.code.includes("<p className="));
+    assert.ok(reactRes.code.includes("Payment Method"));
+    assert.ok(reactRes.code.includes("<button className="));
+    assert.ok(reactRes.code.includes("Pay Now"));
+  });
+
+  it("should safely escape JSX curly braces and special characters in figmaToReact19", () => {
+    const textNodes: FigmaNode[] = [
+      {
+        id: "promo_text",
+        name: "PromoBanner",
+        type: "TEXT",
+        characters: "Discount: {20%} & special <offer> {VIP}",
+        fontSize: 16
+      }
+    ];
+
+    const reactRes = figmaToReact19(textNodes, { componentName: "PromoBanner" });
+    assert.ok(reactRes.code.includes("Discount: &#123;20%&#125; &amp; special &lt;offer&gt; &#123;VIP&#125;"));
+    // 确保未引入未转义的单花括号导致 JSX 解析失败
+    assert.ok(!reactRes.code.includes("{20%}"));
+  });
+
+  it("should preserve full visual attributes through Kiwi binary pack and unpack", () => {
+    const fullNode: FigmaNode = {
+      id: "styled_box",
+      name: "StyledContainer",
+      type: "FRAME",
+      x: 120,
+      y: 80,
+      width: 320,
+      height: 240,
+      stackMode: "HORIZONTAL",
+      itemSpacing: 12,
+      paddingLeft: 16,
+      paddingRight: 16,
+      paddingTop: 8,
+      paddingBottom: 8,
+      primaryAxisAlignItems: "CENTER",
+      counterAxisAlignItems: "CENTER",
+      fills: [{ type: "SOLID", color: { r: 0.2, g: 0.4, b: 0.8, a: 0.9 } }],
+      strokes: [{ type: "SOLID", color: { r: 0.1, g: 0.1, b: 0.1, a: 1 } }],
+      strokeWeight: 2,
+      cornerRadius: 12,
+      effects: [{ type: "DROP_SHADOW", radius: 10, visible: true }],
+      opacity: 0.95
+    };
+
+    const binary = packKiwiBinary([fullNode]);
+    const unpacked = unpackKiwiBinary(binary);
+
+    assert.equal(unpacked.length, 1);
+    const n = unpacked[0];
+    assert.equal(n.id, "styled_box");
+    assert.equal(n.x, 120);
+    assert.equal(n.y, 80);
+    assert.equal(n.width, 320);
+    assert.equal(n.height, 240);
+    assert.equal(n.primaryAxisAlignItems, "CENTER");
+    assert.equal(n.counterAxisAlignItems, "CENTER");
+    assert.equal(n.strokeWeight, 2);
+    assert.ok(n.strokes && n.strokes.length > 0);
+    assert.ok(n.effects && n.effects[0].radius === 10);
+    assert.ok(Math.abs((n.opacity || 1) - 0.95) < 0.01);
+
+    const classes = figmaNodeToTailwindClasses(n);
+    assert.ok(classes.includes("items-center"));
+    assert.ok(classes.includes("justify-center"));
+    assert.ok(classes.includes("border-2"));
+    assert.ok(classes.includes("shadow-md"));
+    assert.ok(classes.includes("opacity-95"));
+  });
+
+  it("should populate canvasRect in sceneToFlatStore when geometry is present", () => {
+    const geoNode: FigmaNode = {
+      id: "geo_1",
+      name: "GeoCard",
+      type: "FRAME",
+      x: 50,
+      y: 75,
+      width: 200,
+      height: 100
+    };
+
+    const scene = buildSceneIndex([geoNode]);
+    const res = sceneToFlatStore(scene);
+
+    assert.equal(res.elements.length, 1);
+    assert.deepEqual(res.elements[0].canvasRect, {
+      left: 50,
+      top: 75,
+      width: 200,
+      height: 100
+    });
+  });
 });

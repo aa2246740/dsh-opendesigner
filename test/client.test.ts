@@ -203,10 +203,15 @@ describe("Client - DSH Web Client Artifact lib/client.js", () => {
     const exported = loaderEntry.factory();
     assert.ok(exported.InfiniteCanvasViewport);
     assert.ok(exported.SelectionManager);
+    assert.ok(exported.CanvasPanel);
+    assert.ok(exported.CanvasInteractionController);
+    assert.ok(exported.SelectionOverlayRenderer);
     assert.ok(exported.worldToScreen);
 
     const clientState = exported.initDesignerClient();
     assert.equal(clientState.viewport.getZoom(), 1.0);
     assert.equal(clientState.selectedElementIds.length, 0);
+    assert.ok(clientState.panel);
+    assert.equal(typeof clientState.panel.registerElement, "function");
   });
 });

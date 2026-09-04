@@ -160,6 +160,48 @@ describe("Client - CanvasPanel & Unified Visual Viewport Engine", () => {
     assert.ok(html.includes("handle-se"));
     assert.ok(html.includes("Hero Content"));
   });
+
+  it("should synchronize elementRects and store canvasRect across move and resize without snap-back on subsequent mutations", () => {
+    const panel = new CanvasPanel();
+    panel.registerElement(
+      "card_1",
+      { left: 10, top: 10, width: 100, height: 100 },
+      {
+        id: "card_1",
+        type: "element",
+        tag: "section",
+        props: { className: "card" }
+      }
+    );
+
+    panel.select(["card_1"]);
+    assert.deepEqual(panel.getSelectedBoundingBox(), { left: 10, top: 10, width: 100, height: 100 });
+
+    // 1. 拖拽移动
+    panel.controller.startDrag({ x: 10, y: 10 });
+    panel.moveSelected({ x: 60, y: 60 });
+    panel.controller.endDrag();
+
+    assert.deepEqual(panel.getSelectedBoundingBox(), { left: 60, top: 60, width: 100, height: 100 });
+    assert.deepEqual(panel.getElementRect("card_1"), { left: 60, top: 60, width: 100, height: 100 });
+    assert.deepEqual(panel.store.getElement("card_1")?.canvasRect, { left: 60, top: 60, width: 100, height: 100 });
+
+    // 2. 注册新元素以触发 syncSelectionManager，验证绝无回跳 (No Snap-Back)
+    panel.registerElement("badge_1", { left: 500, top: 500, width: 60, height: 30 });
+    assert.deepEqual(panel.getElementRect("card_1"), { left: 60, top: 60, width: 100, height: 100 });
+
+    // 3. 缩放
+    panel.controller.startResize("se", { x: 160, y: 160 });
+    panel.resizeSelected({ x: 210, y: 210 });
+    panel.controller.endResize();
+
+    assert.deepEqual(panel.getElementRect("card_1"), { left: 60, top: 60, width: 150, height: 150 });
+    assert.deepEqual(panel.store.getElement("card_1")?.canvasRect, { left: 60, top: 60, width: 150, height: 150 });
+
+    // 4. 移除新元素，再次验证状态保持
+    panel.unregisterElement("badge_1");
+    assert.deepEqual(panel.getElementRect("card_1"), { left: 60, top: 60, width: 150, height: 150 });
+  });
 });
 
 class panelSelectionStub {

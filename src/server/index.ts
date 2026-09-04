@@ -14,6 +14,7 @@ import { FlatStore } from "../store/flatStore.ts";
 import { ClaimRegistry } from "./claimRegistry.ts";
 import { dispatchMCPTool, OPEN_DESIGNER_TOOLS } from "./mcpTools.ts";
 import type { MCPContext, MCPToolDefinition } from "./mcpTools.ts";
+import { AIGateway, type AIGatewayConfig } from "./aiGateway.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +24,7 @@ export interface OpenDesignerConfig {
   autoApprove?: boolean;
   ttlMs?: number;
   modelProvider?: "deepseek" | "openai" | "ollama";
+  aiConfig?: Partial<AIGatewayConfig>;
 }
 
 export interface GitSyncStatus {
@@ -42,6 +44,7 @@ export class OpenDesignerService extends Service {
   public autoApprove: boolean;
   public store: FlatStore;
   public claimRegistry: ClaimRegistry;
+  public aiGateway: AIGateway;
   private canvasFilePath: string;
   private designerDir: string;
   private isInitialized: boolean = false;
@@ -76,6 +79,10 @@ export class OpenDesignerService extends Service {
 
     this.store = new FlatStore();
     this.claimRegistry = new ClaimRegistry(config.ttlMs ?? 300_000);
+    this.aiGateway = new AIGateway({
+      provider: config.modelProvider || "deepseek",
+      ...config.aiConfig
+    });
 
     // 若运行在 Cordis 微内核宿主环境，注册 38 个 MCP 工具到 DSH tools 服务
     if (this.ctx && this.ctx.tools) {
@@ -267,3 +274,4 @@ export default OpenDesignerService;
 export * from "./cordis.ts";
 export * from "./claimRegistry.ts";
 export * from "./mcpTools.ts";
+export * from "./aiGateway.ts";
