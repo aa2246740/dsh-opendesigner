@@ -18,7 +18,7 @@ describe("Server - Decoupled Multi-Model AI Gateway", () => {
 
     const gemGateway = new AIGateway({ provider: "gemini" });
     assert.equal(gemGateway.baseURL, PROVIDER_DEFAULTS.gemini.baseURL);
-    assert.equal(gemGateway.model, "gemini-2.0-flash");
+    assert.equal(gemGateway.model, "gemini-flash-latest");
     assert.equal(gemGateway.mockMode, true);
   });
 

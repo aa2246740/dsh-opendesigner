@@ -67,7 +67,7 @@ export const PROVIDER_DEFAULTS: Record<AIProvider, { baseURL: string; defaultMod
   },
   gemini: {
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
-    defaultModel: "gemini-2.0-flash"
+    defaultModel: "gemini-flash-latest"
   },
   minimax: {
     baseURL: "https://api.minimaxi.com/v1",
