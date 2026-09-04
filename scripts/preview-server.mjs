@@ -105,7 +105,7 @@ const server = http.createServer(async (req, res) => {
         sourceCode: payload.sourceCode,
         instruction: payload.instruction
       },
-      { fallbackToMock: true }
+      { fallbackToMock: true, maxRetries: 0 }
     );
     send(
       res,

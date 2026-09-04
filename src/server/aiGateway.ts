@@ -324,7 +324,8 @@ export class AIGateway {
     const response = await this.fetchFn(endpoint, {
       method: "POST",
       headers,
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(8_000)
     });
 
     if (!response.ok) {
