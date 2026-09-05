@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { apply, name as pluginName, inject as pluginInject } from "../src/plugin.ts";
 import { OpenDesignerService } from "../src/server/index.ts";
-import { JSON_OUTPUT } from "../src/server/dshAdapter.ts";
+import { JSON_OUTPUT, REQUIRED_DSH_RELEASE } from "../src/server/dshAdapter.ts";
 import type { CordisToolDef } from "../src/server/cordis.ts";
 import { assertSupportedJsonSchema } from "@deepseek-ai/dsh-tools";
 
@@ -24,6 +24,19 @@ describe("Server - DSH plugin form", () => {
     assert.deepEqual(pluginInject, ["tools"]);
     assert.equal(typeof apply, "function");
     assert.equal(OpenDesignerService.serviceName, "openDesigner");
+  });
+
+  it("pins DeepSeek Harness 0.1.2-rc.1 in package.json and status()", async () => {
+    const pkg = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8"));
+    assert.equal(REQUIRED_DSH_RELEASE, "0.1.2-rc.1");
+    assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-tools"], REQUIRED_DSH_RELEASE);
+    assert.equal(pkg.optionalDependencies["@deepseek-ai/dsh-tools"], REQUIRED_DSH_RELEASE);
+    assert.equal(pkg.peerDependencies["@deepseek-ai/cordis"], "^4.0.2");
+    assert.equal(pkg.dsh?.bundle?.patch, "./cordis.patch.yml");
+    assert.equal(pkg.dsh?.client, undefined);
+
+    const service = new OpenDesignerService({ projectRoot: CORDIS_TEST_DIR });
+    assert.equal(service.status().requiredDsh, REQUIRED_DSH_RELEASE);
   });
 
   it("registers tools through ctx.tools.register", async () => {
@@ -47,6 +60,13 @@ describe("Server - DSH plugin form", () => {
     assert.ok(listTool);
     const listRes = await listTool.execute({});
     assert.ok(Array.isArray(listRes.pages));
+
+    const ac = new AbortController();
+    ac.abort();
+    await assert.rejects(
+      () => listTool.execute({}, { signal: ac.signal }),
+      /aborted/
+    );
   });
 
   it("wraps tools with defineTool so output.schema is JSON Schema", async () => {

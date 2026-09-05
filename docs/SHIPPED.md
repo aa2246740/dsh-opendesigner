@@ -1,15 +1,27 @@
 # What ships
 
-This is the product spec for the tree as loaded by DeepSeek Harness. Historical notes in `docs/01`–`docs/07` are not this spec.
+This is the product spec for the tree as loaded by DeepSeek Harness **0.1.2-rc.1**. Historical notes in `docs/01`–`docs/07` are not this spec.
+
+## Required host
+
+| Piece | Pin |
+|---|---|
+| CLI | `@deepseek-ai/dsh@0.1.2-rc.1` (`npx @deepseek-ai/dsh@0.1.2-rc.1 --version`) |
+| Tool registry | `@deepseek-ai/dsh-tools@0.1.2-rc.1` (peer + optionalDependency) |
+| Cordis | `@deepseek-ai/cordis@^4.0.2` |
+| Node | `>=22.14.0` |
+
+Install with a clean `$DSH_HOME` and `dsh plugin --profile web add`. Do not vendor or patch DSH source. `opendesigner_status` includes `requiredDsh: "0.1.2-rc.1"`.
 
 ## Plugin contract
 
 | Piece | Location |
 |---|---|
 | Host entry | `src/plugin.ts` (`apply`, `name`, `inject`) |
-| Bundle patch | `cordis.patch.yml` |
+| Bundle patch | `cordis.patch.yml` plus `package.json` `dsh.bundle.patch` |
 | Domain service | `src/server/index.ts` `OpenDesignerService` |
 | Tool catalog | `src/server/mcpTools.ts` |
+| Host adapter | `src/server/dshAdapter.ts` (`defineTool`, JSON Schema `output.schema`) |
 | Path jail | `src/server/pathJail.ts` |
 | Destructive approval | `src/server/approval.ts` |
 | Checkpoints / Rewind | `src/server/checkpoints.ts` |
@@ -18,11 +30,11 @@ This is the product spec for the tree as loaded by DeepSeek Harness. Historical 
 | Client library | `src/client/*`, bundled to `lib/client.js` (no Babel; Tailwind merge lives in `src/compiler/tailwindMerge.ts`) |
 | Live preview | `preview.html` + `src/client/previewApp.ts` + `scripts/preview-server.mjs` |
 
-DSH loads the package main (`dist/plugin.js` after `npm run build`). Tests import TypeScript under `src/`.
+DSH loads the package main (`dist/plugin.js` after `npm run build`). Tests import TypeScript under `src/`. There is no `dsh.client` declaration. The preview is the designer UI. A malformed `dsh.client` row fails web boot.
 
 ## Tools
 
-The catalog still has 38 names so existing call sites keep working. Host registration prefixes them with `opendesigner_`. That prefix avoids colliding with DSH built-ins.
+The catalog still has 38 names so existing call sites keep working. Host registration prefixes them with `opendesigner_` and wraps each with `defineTool` from `@deepseek-ai/dsh-tools@0.1.2-rc.1`. That prefix avoids colliding with DSH built-ins. `output.schema` is `{ type: "object", additionalProperties: true }`. Execute honors `exec.signal` abort.
 
 Honest behavior:
 
@@ -34,7 +46,7 @@ Honest behavior:
 
 ## AI
 
-`AIGateway` is an OpenAI-compatible `chat/completions` client. Mock mode is the default without a key. Provider detection lives in `detectAiConfigFromEnv`.
+`AIGateway` is an OpenAI-compatible `chat/completions` client. Mock mode is the default without a key. Provider detection lives in `detectLiveProvidersFromEnv`. Preview `/api/ai-merge` is live-only unless `OPENDESIGNER_FORCE_MOCK=1`.
 
 ## Save model
 
@@ -47,4 +59,3 @@ Worktrees are for Agent batches that may rewrite project source. They are not th
 5. **Approval policy.** Canvas style/geometry tools are auto-allowed (`destructive` unset). Source writes, apply-to-project, and batch apply are gated. `autoApprove` skips the prompt only. Path jail is always on.
 
 The 38-name catalog is unchanged. Persistence tools are extra host tools with the `opendesigner_` prefix.
-

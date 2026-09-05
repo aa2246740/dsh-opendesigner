@@ -4,6 +4,12 @@ A DeepSeek Harness plugin for local-first visual editing of React + Tailwind com
 
 It is an out-of-tree Cordis plugin. It does not patch DeepSeek Harness. File tools stay inside the project root. Destructive writes need an explicit `approve: true` unless you set `autoApprove` (that flag never widens the jail).
 
+## Required host
+
+This package targets published **DeepSeek Harness 0.1.2-rc.1**. Use that CLI and the matching `@deepseek-ai/dsh-tools@0.1.2-rc.1` peer. Do not patch DSH core. Node 22.14 or newer.
+
+Peer range in `package.json`: `@deepseek-ai/dsh-tools` `0.1.2-rc.1`, `@deepseek-ai/cordis` `^4.0.2`.
+
 ## What ships
 
 - Host plugin: `apply` / `name` / `inject = ["tools"]` plus `dsh.bundle.patch`.
@@ -20,21 +26,25 @@ It is an out-of-tree Cordis plugin. It does not patch DeepSeek Harness. File too
 - Lunagraph parity, Figma Kiwi clipboard fidelity, or a React 19 runtime.
 - An HTTP MCP server on port 21209.
 - A 1x1 PNG that marks canvas claims as visually verified. `take_screenshot` fails closed unless you attach a renderer or set `screenshotMode: "jsx-svg"` (a serialization snapshot, not pixels).
+- A `dsh.client` web-shell plugin. The canvas lives in `npm run preview`. Declaring `dsh.client` against `lib/client.js` would fail host boot.
 
 `docs/01` through `docs/07` are historical notes. Do not treat them as the product spec. See [docs/SHIPPED.md](docs/SHIPPED.md).
 
-## Install on DeepSeek Harness
+## Install on DeepSeek Harness 0.1.2-rc.1
 
-Use unmodified DSH. Record the version you boot.
+Record the version you boot. It must print `0.1.2-rc.1`.
 
 ```sh
-npx @deepseek-ai/dsh --version
-dsh plugin --profile web add "$(pwd)"
-dsh --profile web --dump-config
-npx @deepseek-ai/dsh web
+npx @deepseek-ai/dsh@0.1.2-rc.1 --version
+export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+npx @deepseek-ai/dsh@0.1.2-rc.1 plugin --profile web add "$(pwd)"
+npx @deepseek-ai/dsh@0.1.2-rc.1 --profile web --dump-config
+npx @deepseek-ai/dsh@0.1.2-rc.1 web --no-open
 ```
 
-The bundle patch inserts id `dsh-opendesigner`. Host tools are registered as `opendesigner_*` (for example `opendesigner_status`, `opendesigner_canvas_list`, `opendesigner_project_read`).
+`dump-config` must contain a `# == dsh-opendesigner` layer. Settings → Plugins must list the plugin as Enabled.
+
+The bundle patch inserts id `dsh-opendesigner`. Host tools are registered with `ctx.tools.register(defineTool(...))` as `opendesigner_*` (for example `opendesigner_status`, `opendesigner_canvas_list`, `opendesigner_project_read`). `output.schema` is JSON Schema. `opendesigner_status` reports `requiredDsh: "0.1.2-rc.1"` and `hasApiKey` only, never key values.
 
 Scratch overlay while developing against a source checkout:
 
@@ -57,19 +67,20 @@ npm test
 npm run preview
 ```
 
-Open `http://127.0.0.1:4173/`. Use **Fill emerald** or **Radius xl** for a deterministic className edit, then **Rewind**. Use **Create batch** / **Write batch file** / **Apply batch** or **Discard batch** for the Agent-batch path.
+Open `http://127.0.0.1:4173/`. Use **Fill emerald** or **Radius xl** for a deterministic className edit, then **Rewind**. Use **Create batch** / **Write batch file** / **Apply batch** or **Discard batch** for the Agent-batch path. **AI merge** is live-only unless you set `OPENDESIGNER_FORCE_MOCK=1`.
 
 ## AI gateway
 
-Safe default: mock mode when no API key is configured. `apply()` reads, in order:
+Safe default: mock mode when no API key is configured. Preview and `apply()` try live providers in this order when keys exist:
 
-1. `GEMINI_API_KEY` or `GOOGLE_API_KEY`
-2. `OPENROUTER_ONLYUSE_FREEMODEL_API_KEY` or `OPENROUTER_API_KEY`
-3. `MINIMAXCN_API_KEY` or `MINIMAX_CN_API_KEY`
+1. `OPENROUTER_ONLYUSE_FREEMODEL_API_KEY` or `OPENROUTER_API_KEY`
+2. `MINIMAXCN_API_KEY` or `MINIMAX_CN_API_KEY`
+3. `GEMINI_API_KEY` or `GOOGLE_API_KEY`
 4. `DEEPSEEK_API_KEY`
 5. `OPENAI_API_KEY`
+6. `GLM_CN_API_KEY`
 
-Override model with `GEMINI_MODEL`, `OPENROUTER_MODEL`, or `MINIMAX_MODEL`. Never put keys in the repo. `status()` reports `hasApiKey` only.
+Override model with `OPENROUTER_MODEL`, `MINIMAX_MODEL`, or `GEMINI_MODEL`. Never put keys in the repo. `status()` reports `hasApiKey` only.
 
 Ollama has no key. Set `aiConfig.mockMode` to `false` and point `baseURL` at your local server.
 

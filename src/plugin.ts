@@ -1,5 +1,10 @@
 import type { DshHostContext } from "./server/dshAdapter.ts";
-import { extraApproveParam, JSON_OUTPUT, toDshParameters, wrapDefineTool } from "./server/dshAdapter.ts";
+import {
+  extraApproveParam,
+  JSON_OUTPUT,
+  toDshParameters,
+  wrapDefineTool
+} from "./server/dshAdapter.ts";
 import { OpenDesignerService, type OpenDesignerConfig } from "./server/index.ts";
 import { detectAiConfigFromEnv } from "./server/aiGateway.ts";
 import { OPEN_DESIGNER_TOOLS } from "./server/mcpTools.ts";
@@ -38,7 +43,10 @@ export function apply(ctx: DshHostContext, config: Config = {}): OpenDesignerSer
         description: `[OpenDesigner] ${tool.description}`,
         parameters: toDshParameters(tool.parameters, extraApproveParam(tool)),
         output: JSON_OUTPUT,
-        async execute(args: Record<string, unknown>) {
+        async execute(args: Record<string, unknown>, exec?: { signal?: AbortSignal }) {
+          if (exec?.signal?.aborted) {
+            throw new Error("opendesigner tool aborted");
+          }
           await service.init();
           return await service.executeTool(tool.name, args);
         }
@@ -52,7 +60,10 @@ export function apply(ctx: DshHostContext, config: Config = {}): OpenDesignerSer
       description: "[OpenDesigner] Report plugin status, jail root, and AI provider (never includes secrets).",
       parameters: {},
       output: JSON_OUTPUT,
-      async execute() {
+      async execute(_args: Record<string, unknown>, exec?: { signal?: AbortSignal }) {
+        if (exec?.signal?.aborted) {
+          throw new Error("opendesigner tool aborted");
+        }
         await service.init();
         return service.status();
       }

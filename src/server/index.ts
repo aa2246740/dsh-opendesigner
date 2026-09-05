@@ -5,6 +5,7 @@ import { ClaimRegistry } from "./claimRegistry.ts";
 import { dispatchMCPTool, OPEN_DESIGNER_TOOLS } from "./mcpTools.ts";
 import type { MCPContext, ScreenshotMode } from "./mcpTools.ts";
 import { AIGateway, liveProvidersStatus, type AIGatewayConfig, type AIProvider } from "./aiGateway.ts";
+import { REQUIRED_DSH_RELEASE } from "./dshAdapter.ts";
 import { ApprovalRequiredError, assertPersistApproval } from "./approval.ts";
 import { PathJailError, resolveProjectPath } from "./pathJail.ts";
 import { atomicWriteFile, atomicWriteJson } from "./atomicWrite.ts";
@@ -113,6 +114,7 @@ export class OpenDesignerService {
     const open = this.batches.openBatch();
     return {
       name: "dsh-opendesigner",
+      requiredDsh: REQUIRED_DSH_RELEASE,
       projectRoot: this.projectRoot,
       fileIoRoot: this.fileIoRoot(),
       autoApprove: this.autoApprove,

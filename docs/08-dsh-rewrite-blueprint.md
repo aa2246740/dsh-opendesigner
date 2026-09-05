@@ -9,12 +9,12 @@ DeepSeek Harness loads capabilities as Cordis plugins. OpenDesigner is one of th
 ## Shape that ships
 
 ```
-DSH host (unmodified)
-  └─ dsh plugin add ./dsh-opendesigner
+DSH host (unmodified `@deepseek-ai/dsh@0.1.2-rc.1`)
+  └─ dsh plugin --profile web add ./dsh-opendesigner
        └─ cordis.patch.yml inserts id dsh-opendesigner
             └─ src/plugin.ts apply(ctx)
                  ├─ OpenDesignerService (jailed tools, canvas store, AI gateway)
-                 └─ ctx.tools.register(opendesigner_*)
+                 └─ ctx.tools.register(defineTool(opendesigner_*))
 
 Preview (documented designer surface)
   npm run preview → preview.html + CanvasPanel

@@ -38,6 +38,9 @@ export interface DshHostContext {
   get?: (name: string) => unknown;
 }
 
+/** Host CLI and `@deepseek-ai/dsh-tools` release this plugin is proved against. */
+export const REQUIRED_DSH_RELEASE = "0.1.2-rc.1";
+
 export const JSON_OUTPUT = {
   schema: { type: "object" as const, additionalProperties: true },
   render: (_args: unknown, value: unknown) => [
@@ -102,6 +105,13 @@ function defineToolResolvers(): string[] {
     pathToFileURL(path.join(pluginRoot, "package.json")).href,
     pathToFileURL(path.join(process.cwd(), "package.json")).href
   ];
+  if (typeof process.argv[1] === "string") {
+    try {
+      bases.push(pathToFileURL(path.resolve(process.argv[1])).href);
+    } catch {
+      // argv[1] is not always a file path.
+    }
+  }
   const home = process.env.DSH_HOME;
   if (home) {
     try {
