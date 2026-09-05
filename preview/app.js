@@ -2491,7 +2491,7 @@ var OpenDesignerPreview = (() => {
           <div class="od-actions">
             <button type="button" data-testid="edit-fill" id="od-edit-fill" data-tooltip="Fill emerald shortcut">Fill emerald</button>
             <button type="button" data-testid="edit-radius" id="od-edit-radius" data-tooltip="Radius xl shortcut">Radius xl</button>
-            <button type="button" data-testid="ai-merge" id="od-ai-merge" data-tooltip="AI merge: live provider, then offline mock if the network fails">AI merge</button>
+            <button type="button" data-testid="ai-merge" id="od-ai-merge" data-tooltip="AI merge: live providers only (OpenRouter MiniMax free \u2192 MiniMax CN \u2192 Gemini \u2192 DeepSeek \u2192 OpenAI)">AI merge</button>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
@@ -2507,6 +2507,7 @@ var OpenDesignerPreview = (() => {
             <button type="button" data-testid="batch-discard" id="od-batch-discard" data-tooltip="Discard the agent worktree">Discard batch</button>
           </div>
           <pre id="od-persist" class="od-mono" data-testid="persist-log">persistence idle</pre>
+          <pre id="od-ai-banner" class="od-mono" data-testid="ai-live-banner">AI merge: live-only (no mock)</pre>
           <pre id="od-class" class="od-mono" data-testid="class-output"></pre>
           <pre id="od-ai" class="od-mono" data-testid="ai-output"></pre>
           <div class="od-styles-title">Stubs</div>
@@ -2521,6 +2522,7 @@ var OpenDesignerPreview = (() => {
     const classEl = root.querySelector("#od-class");
     const statusEl = root.querySelector("#od-status");
     const aiEl = root.querySelector("#od-ai");
+    const aiBannerEl = root.querySelector("#od-ai-banner");
     const persistEl = root.querySelector("#od-persist");
     const autosaveEl = root.querySelector("#od-autosave");
     const inspectorEl = root.querySelector("#od-inspector");
@@ -2594,7 +2596,8 @@ var OpenDesignerPreview = (() => {
       if (!api.getStatus) return;
       const status = await api.getStatus();
       const persistence = status.persistence || {};
-      statusEl.textContent = `plugin ${status.name} | jail ${status.projectRoot} | autoApprove=${status.autoApprove}`;
+      const ai = status.ai || {};
+      statusEl.textContent = `plugin ${status.name} | jail ${status.projectRoot} | autoApprove=${status.autoApprove} | ai ${ai.provider || "none"}/${ai.model || "none"} mock=${ai.mockMode === true} hasApiKey=${ai.hasApiKey === true}`;
       autosaveEl.textContent = `working copy ${persistence.lastAutosaveAt || "none"} | checkpoints ${persistence.checkpointCount ?? 0} | current ${persistence.currentCheckpointLabel || "none"}`;
       openBatchId = typeof persistence.openBatchId === "string" ? persistence.openBatchId : null;
     }
@@ -2739,18 +2742,27 @@ var OpenDesignerPreview = (() => {
       const id = selectedId() || BTN_ID;
       const source = `<button className="${classNameOf(store, id)}">${store.getElement(id)?.textContent || ""}</button>`;
       const result = await api.applyAiMerge(source, "Add shadow-lg to the button className");
-      if (result.success && result.mergedCode) {
+      const attempts = (result.attemptsLog || []).map((row) => `${row.label || row.provider} HTTP ${row.httpStatus ?? "err"} ${row.ok ? "ok" : "fail"}`).join("\n");
+      if (result.success && result.mergedCode && result.fallback !== true && result.mockMode !== true) {
         const match = result.mergedCode.match(/className="([^"]*)"/);
         if (match) setClassName(store, id, match[1]);
-        const live = result.fallback ? `live failed: ${result.liveError || "provider error"}
-fallback=mock-offline` : `live ok mockMode=${result.mockMode === true}`;
-        aiEl.textContent = `${live}
-model=${result.model || "unknown"}
+        const banner = `provider=${result.provider || "unknown"} model=${result.model || "unknown"} mock=false`;
+        aiBannerEl.textContent = banner;
+        aiEl.textContent = `${banner}
+${attempts}
 ${result.mergedCode}`;
         render();
-        void checkpointAndAutosave(result.fallback ? "ai-merge-mock" : "ai-merge");
+        void checkpointAndAutosave("ai-merge");
+      } else if (result.success && result.fallback) {
+        aiBannerEl.textContent = `mock fallback (offline demo only) model=${result.model || "mock-offline"}`;
+        aiEl.textContent = `live failed: ${result.liveError || "provider error"}
+fallback=mock-offline
+${attempts}
+${result.mergedCode || ""}`;
       } else {
-        aiEl.textContent = result.error || "AI merge failed";
+        aiBannerEl.textContent = "AI merge live failed (no mock)";
+        aiEl.textContent = `${result.error || "AI merge failed"}
+${attempts}`;
       }
     });
     root.querySelector("#od-insert-box").addEventListener("click", () => insertBox());

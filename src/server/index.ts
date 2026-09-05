@@ -4,7 +4,7 @@ import { FlatStore } from "../store/flatStore.ts";
 import { ClaimRegistry } from "./claimRegistry.ts";
 import { dispatchMCPTool, OPEN_DESIGNER_TOOLS } from "./mcpTools.ts";
 import type { MCPContext, ScreenshotMode } from "./mcpTools.ts";
-import { AIGateway, type AIGatewayConfig, type AIProvider } from "./aiGateway.ts";
+import { AIGateway, liveProvidersStatus, type AIGatewayConfig, type AIProvider } from "./aiGateway.ts";
 import { ApprovalRequiredError, assertPersistApproval } from "./approval.ts";
 import { PathJailError, resolveProjectPath } from "./pathJail.ts";
 import { atomicWriteFile, atomicWriteJson } from "./atomicWrite.ts";
@@ -118,7 +118,10 @@ export class OpenDesignerService {
       autoApprove: this.autoApprove,
       screenshotMode: this.screenshotMode,
       toolCount: OPEN_DESIGNER_TOOLS.length,
-      ai: this.aiGateway.status(),
+      ai: {
+        ...this.aiGateway.status(),
+        liveProviders: liveProvidersStatus()
+      },
       persistence: {
         workingCopy: ".designer/canvas.json",
         lastAutosaveAt: this.lastAutosaveAt,

@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { OpenDesignerService } from "../src/server/index.ts";
-import { detectAiConfigFromEnv } from "../src/server/aiGateway.ts";
+import { detectAiConfigFromEnv, generateAndApplyLive } from "../src/server/aiGateway.ts";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
@@ -100,13 +100,22 @@ const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-    const result = await service.aiGateway.generateAndApply(
-      {
-        sourceCode: payload.sourceCode,
-        instruction: payload.instruction
-      },
-      { fallbackToMock: true, maxRetries: 0 }
-    );
+    const forceMock = process.env.OPENDESIGNER_FORCE_MOCK === "1";
+    const result = forceMock
+      ? await service.aiGateway.generateAndApply(
+          {
+            sourceCode: payload.sourceCode,
+            instruction: payload.instruction
+          },
+          { fallbackToMock: true }
+        )
+      : await generateAndApplyLive(
+          {
+            sourceCode: payload.sourceCode,
+            instruction: payload.instruction
+          },
+          { fallbackToMock: false, timeoutMs: 90_000, maxRetriesPerProvider: 1 }
+        );
     send(
       res,
       200,
@@ -114,10 +123,12 @@ const server = http.createServer(async (req, res) => {
         success: result.success,
         mergedCode: result.mergedCode,
         model: result.model,
+        provider: result.provider || null,
         error: result.error,
-        mockMode: service.aiGateway.mockMode,
+        mockMode: forceMock || result.fallback === true,
         fallback: result.fallback === true,
-        liveError: result.liveError || null
+        liveError: result.liveError || null,
+        attemptsLog: result.attemptsLog || []
       }),
       MIME[".json"]
     );

@@ -1,6 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { AIGateway, PROVIDER_DEFAULTS, detectAiConfigFromEnv } from "../src/server/aiGateway.ts";
+import {
+  AIGateway,
+  PROVIDER_DEFAULTS,
+  detectAiConfigFromEnv,
+  detectLiveProvidersFromEnv,
+  generateAndApplyLive,
+  liveProvidersStatus,
+  OPENROUTER_FREE_MINIMAX_MODEL
+} from "../src/server/aiGateway.ts";
 
 describe("Server - Decoupled Multi-Model AI Gateway", () => {
   it("should configure correct endpoints and defaults for DeepSeek, OpenAI, and Ollama", () => {
@@ -308,19 +316,121 @@ Hope this helps!`;
     assert.ok(res.mergedCode?.includes('className="px-4 py-2 shadow-lg"'));
   });
 
-  it("detects Gemini before OpenRouter and never returns the key in status()", () => {
-    const gemini = detectAiConfigFromEnv({
-      GEMINI_API_KEY: "secret-gemini",
-      OPENROUTER_ONLYUSE_FREEMODEL_API_KEY: "secret-openrouter"
-    });
-    assert.equal(gemini.provider, "gemini");
-    assert.equal(gemini.model, PROVIDER_DEFAULTS.gemini.defaultModel);
+  it("does not pretend success via mock when live HTTP 503 and fallbackToMock is false", async () => {
+    const mockFetch = async () =>
+      new Response("provider unavailable", { status: 503, headers: { "Content-Type": "text/plain" } });
 
-    const gateway = new AIGateway(gemini);
+    const gateway = new AIGateway({
+      provider: "deepseek",
+      apiKey: "sk-mock-key",
+      fetchFn: mockFetch as any,
+      mockMode: false
+    });
+
+    const source = `export const Box = () => <button className="px-4 py-2">Build</button>;`;
+    const res = await gateway.generateAndApply(
+      { sourceCode: source, instruction: "Add shadow-lg to the button className" },
+      { fallbackToMock: false, maxRetries: 0 }
+    );
+
+    assert.equal(res.success, false);
+    assert.equal(res.fallback, false);
+    assert.notEqual(res.model, "mock-offline");
+    assert.equal(res.mergedCode, undefined);
+    assert.equal(res.httpStatus, 503);
+    assert.ok(res.error?.includes("HTTP 503"));
+  });
+
+  it("failovers to the next live provider and does not mock", async () => {
+    const mockToolResponse = {
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            tool_calls: [
+              {
+                function: {
+                  name: "save_to_code_edits",
+                  arguments: JSON.stringify({
+                    edits: [
+                      {
+                        old_string: 'className="px-4 py-2"',
+                        new_string: 'className="px-4 py-2 shadow-lg"',
+                        replace_all: false
+                      }
+                    ]
+                  })
+                }
+              }
+            ]
+          }
+        }
+      ]
+    };
+
+    const mockFetch = async (url: string) => {
+      if (String(url).includes("openrouter.ai")) {
+        return new Response("busy", { status: 503, headers: { "Retry-After": "0" } });
+      }
+      if (String(url).includes("minimaxi.com")) {
+        return new Response("busy", { status: 429, headers: { "Retry-After": "0" } });
+      }
+      return new Response(JSON.stringify(mockToolResponse), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    };
+
+    const res = await generateAndApplyLive(
+      {
+        sourceCode: `export const Box = () => <button className="px-4 py-2">Build</button>;`,
+        instruction: "Add shadow-lg to the button className"
+      },
+      {
+        env: {
+          OPENROUTER_ONLYUSE_FREEMODEL_API_KEY: "sk-openrouter-test",
+          MINIMAXCN_API_KEY: "sk-minimax-test",
+          GEMINI_API_KEY: "secret-gemini"
+        } as NodeJS.ProcessEnv,
+        fetchFn: mockFetch as any,
+        fallbackToMock: false,
+        maxRetriesPerProvider: 0
+      }
+    );
+
+    assert.equal(res.success, true);
+    assert.equal(res.fallback, false);
+    assert.equal(res.provider, "gemini");
+    assert.ok(res.mergedCode?.includes("shadow-lg"));
+    assert.equal(res.attemptsLog?.[0]?.httpStatus, 503);
+    assert.equal(res.attemptsLog?.[1]?.httpStatus, 429);
+    assert.equal(res.attemptsLog?.[2]?.ok, true);
+    assert.equal(JSON.stringify(res).includes("secret-gemini"), false);
+  });
+
+  it("lists OpenRouter MiniMax free before MiniMax CN and Gemini, and never returns the key in status()", () => {
+    const env = {
+      GEMINI_API_KEY: "secret-gemini",
+      OPENROUTER_ONLYUSE_FREEMODEL_API_KEY: "secret-openrouter",
+      MINIMAXCN_API_KEY: "secret-minimax"
+    };
+    const live = detectLiveProvidersFromEnv(env);
+    assert.deepEqual(
+      live.map((item) => item.label),
+      ["openrouter-minimax-free", "minimax-cn", "gemini"]
+    );
+    assert.equal(live[0].model, OPENROUTER_FREE_MINIMAX_MODEL);
+
+    const first = detectAiConfigFromEnv(env);
+    assert.equal(first.provider, "openrouter");
+    assert.equal(first.model, OPENROUTER_FREE_MINIMAX_MODEL);
+
+    const gateway = new AIGateway(first);
     const status = gateway.status();
     assert.equal(status.hasApiKey, true);
     assert.equal(status.mockMode, false);
-    assert.equal(JSON.stringify(status).includes("secret-gemini"), false);
+    assert.equal(JSON.stringify(status).includes("secret-openrouter"), false);
+    assert.equal(JSON.stringify(liveProvidersStatus(env)).includes("secret-"), false);
 
     const none = detectAiConfigFromEnv({});
     assert.deepEqual(none, {});
