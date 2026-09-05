@@ -1,0 +1,4 @@
+# Bundle layer for `dsh plugin add`. Package name, not a machine path.
+- insert:
+    - id: dsh-opendesigner
+      name: dsh-opendesigner

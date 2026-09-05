@@ -16,6 +16,29 @@ export interface Rect {
 
 export type ResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
+/** Designed product minimum for resize; not a 1px engine floor. */
+export const MIN_ELEMENT_SIZE = 8;
+
+export function rectFromPoints(a: Point, b: Point): Rect {
+  const left = Math.min(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  return {
+    left,
+    top,
+    width: Math.abs(b.x - a.x),
+    height: Math.abs(b.y - a.y)
+  };
+}
+
+export function rectsIntersect(a: Rect, b: Rect): boolean {
+  return (
+    a.left < b.left + b.width &&
+    a.left + a.width > b.left &&
+    a.top < b.top + b.height &&
+    a.top + a.height > b.top
+  );
+}
+
 /**
  * 世界坐标转换为屏幕视口坐标
  */
@@ -84,8 +107,8 @@ export function companionGeometry(
   deltaWidth: number,
   deltaHeight: number
 ): Rect {
-  const width = Math.max(1, start.width + deltaWidth);
-  const height = Math.max(1, start.height + deltaHeight);
+  const width = Math.max(MIN_ELEMENT_SIZE, start.width + deltaWidth);
+  const height = Math.max(MIN_ELEMENT_SIZE, start.height + deltaHeight);
 
   return {
     width,
@@ -154,8 +177,8 @@ export function multiResize(
       rect: {
         left: newGroupBox.left + relLeft * newGroupBox.width,
         top: newGroupBox.top + relTop * newGroupBox.height,
-        width: Math.max(1, relWidth * newGroupBox.width),
-        height: Math.max(1, relHeight * newGroupBox.height)
+        width: Math.max(MIN_ELEMENT_SIZE, relWidth * newGroupBox.width),
+        height: Math.max(MIN_ELEMENT_SIZE, relHeight * newGroupBox.height)
       }
     };
   });

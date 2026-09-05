@@ -9,5 +9,10 @@ out/
 .DS_Store
 .designer/
 test-fixtures/
+*.tsbuildinfo
+preview-screenshot.png
+*.mp4
+lib/*.map
+preview/*.map
 
 

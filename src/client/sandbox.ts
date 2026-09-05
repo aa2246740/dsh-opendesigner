@@ -4,7 +4,7 @@
  * 提供安全错误边界隔离与虚拟 DOM / 静态 HTML 预览生成
  */
 
-import type { FEElement, FlatStore } from "../store/flatStore.ts";
+import type { CanvasRect, FlatStore } from "../store/flatStore.ts";
 import * as NextShims from "./next-shims/index.ts";
 
 export interface SandboxRenderOptions {
@@ -42,7 +42,7 @@ export class ComponentSandbox {
   /**
    * 将 FlatStore 节点递归渲染为安全虚拟 DOM 结构
    */
-  public renderElement(store: FlatStore, elementId: string): RenderedNode | string {
+  public renderElement(store: FlatStore, elementId: string, parentRect?: CanvasRect): RenderedNode | string {
     const el = store.getElement(elementId);
     if (!el) return "";
 
@@ -58,7 +58,7 @@ export class ComponentSandbox {
     }
 
     for (const child of children) {
-      renderedChildren.push(this.renderElement(store, child.id));
+      renderedChildren.push(this.renderElement(store, child.id, el.canvasRect));
     }
 
     // 针对 Next.js 常见组件做 Shim 处理
@@ -89,12 +89,52 @@ export class ComponentSandbox {
     if (!finalProps["data-element-id"]) {
       finalProps["data-element-id"] = el.id;
     }
+    if (!finalProps["data-testid"]) {
+      finalProps["data-testid"] = `node-${el.id}`;
+    }
+
+    if (el.canvasRect) {
+      this.applyCanvasRectStyle(finalProps, el.canvasRect, parentRect);
+    }
 
     return {
       tag: finalTag,
       props: finalProps,
       children: renderedChildren
     };
+  }
+
+  /**
+   * Map world canvasRect onto a positioned node. Nested children use parent-relative left/top.
+   */
+  private applyCanvasRectStyle(
+    props: Record<string, any>,
+    rect: CanvasRect,
+    parentRect?: CanvasRect
+  ): void {
+    const left = parentRect ? rect.left - parentRect.left : rect.left;
+    const top = parentRect ? rect.top - parentRect.top : rect.top;
+    const layout: Record<string, string> = {
+      position: "absolute",
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      boxSizing: "border-box"
+    };
+
+    if (props.style && typeof props.style === "object" && !Array.isArray(props.style)) {
+      props.style = { ...layout, ...props.style };
+      return;
+    }
+    if (typeof props.style === "string" && props.style.trim()) {
+      const css = Object.entries(layout)
+        .map(([k, v]) => `${k.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}:${v}`)
+        .join(";");
+      props.style = `${css};${props.style}`;
+      return;
+    }
+    props.style = layout;
   }
 
   /**
@@ -115,6 +155,7 @@ export class ComponentSandbox {
     }
 
     const { tag, props, children } = node;
+    const safeTag = /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tag) ? tag : "div";
     const attrs = Object.entries(props)
       .map(([k, v]) => {
         if (typeof v === "function") return "";
@@ -137,12 +178,12 @@ export class ComponentSandbox {
     const attrStr = attrs ? ` ${attrs}` : "";
 
     const selfClosingTags = new Set(["img", "input", "br", "hr", "meta", "link"]);
-    if (selfClosingTags.has(tag.toLowerCase()) && children.length === 0) {
-      return `<${tag}${attrStr} />`;
+    if (selfClosingTags.has(safeTag.toLowerCase()) && children.length === 0) {
+      return `<${safeTag}${attrStr} />`;
     }
 
     const innerHtml = children.map((c) => this.nodeToHtmlString(c)).join("");
-    return `<${tag}${attrStr}>${innerHtml}</${tag}>`;
+    return `<${safeTag}${attrStr}>${innerHtml}</${safeTag}>`;
   }
 
   private escapeHtml(str: string): string {

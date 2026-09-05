@@ -4,7 +4,7 @@
  * 联动 mergeTailwindClasses 确保无损排他更新
  */
 
-import { mergeTailwindClasses } from "../compiler/sourceEdit.ts";
+import { mergeTailwindClasses } from "../compiler/tailwindMerge.ts";
 import type { FEElement } from "../store/flatStore.ts";
 
 export interface ParsedStyles {

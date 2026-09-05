@@ -1,29 +1,29 @@
-/**
- * DSH OpenDesigner 服务端核心服务
- * 深度融合 Cordis 微内核架构（OpenDesignerService extends Service）
- * 注入 tools 服务，无缝挂载 38 个 MCP 原生工具
- * 支持 .designer/canvas.json 原子持久化与本地 Git 工作区同步
- */
-
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { Context, Service } from "./cordis.ts";
 import { FlatStore } from "../store/flatStore.ts";
 import { ClaimRegistry } from "./claimRegistry.ts";
 import { dispatchMCPTool, OPEN_DESIGNER_TOOLS } from "./mcpTools.ts";
-import type { MCPContext, MCPToolDefinition } from "./mcpTools.ts";
-import { AIGateway, type AIGatewayConfig } from "./aiGateway.ts";
-
-const execFileAsync = promisify(execFile);
+import type { MCPContext, ScreenshotMode } from "./mcpTools.ts";
+import { AIGateway, liveProvidersStatus, type AIGatewayConfig, type AIProvider } from "./aiGateway.ts";
+import { REQUIRED_DSH_RELEASE } from "./dshAdapter.ts";
+import { ApprovalRequiredError, assertPersistApproval } from "./approval.ts";
+import { PathJailError, resolveProjectPath } from "./pathJail.ts";
+import { atomicWriteFile, atomicWriteJson } from "./atomicWrite.ts";
+import { CheckpointLog, type CheckpointKind } from "./checkpoints.ts";
+import { AgentBatchRegistry, BatchError, GitRequiredError } from "./agentBatch.ts";
+import { git } from "./gitExec.ts";
+import {
+  CANVAS_MUTATION_TOOLS,
+  PERSISTENCE_TOOL_NAMES,
+  SOURCE_MUTATION_TOOLS
+} from "./persistenceTools.ts";
 
 export interface OpenDesignerConfig {
   projectRoot?: string;
-  port?: number;
   autoApprove?: boolean;
   ttlMs?: number;
-  modelProvider?: "deepseek" | "openai" | "ollama";
+  screenshotMode?: ScreenshotMode;
+  modelProvider?: AIProvider;
   aiConfig?: Partial<AIGatewayConfig>;
 }
 
@@ -35,47 +35,33 @@ export interface GitSyncStatus {
   canvasTracked: boolean;
 }
 
-export class OpenDesignerService extends Service {
-  public static inject = ["tools"];
+export class OpenDesignerService {
   public static readonly serviceName = "openDesigner";
 
   public projectRoot: string;
-  public port: number;
   public autoApprove: boolean;
+  public screenshotMode: ScreenshotMode;
   public store: FlatStore;
   public claimRegistry: ClaimRegistry;
   public aiGateway: AIGateway;
+  public checkpoints: CheckpointLog;
+  public batches: AgentBatchRegistry;
+  public sessionTouched = new Set<string>();
+
   private canvasFilePath: string;
   private designerDir: string;
+  private appliedFilePath: string;
   private isInitialized: boolean = false;
+  private lastAutosaveAt: string | null = null;
+  private lastAppliedAt: string | null = null;
 
-  constructor(
-    ctxOrConfig?: Context | OpenDesignerConfig,
-    maybeConfig?: OpenDesignerConfig
-  ) {
-    let ctx: Context;
-    let config: OpenDesignerConfig;
-
-    if (
-      ctxOrConfig &&
-      (typeof (ctxOrConfig as Context).provide === "function" ||
-        (ctxOrConfig as Context).tools !== undefined ||
-        maybeConfig !== undefined)
-    ) {
-      ctx = ctxOrConfig as Context;
-      config = maybeConfig || {};
-    } else {
-      ctx = {} as Context;
-      config = (ctxOrConfig as OpenDesignerConfig) || {};
-    }
-
-    super(ctx, "openDesigner", true);
-
-    this.projectRoot = config.projectRoot || process.cwd();
-    this.port = config.port || 21209;
-    this.autoApprove = config.autoApprove ?? true;
+  constructor(config: OpenDesignerConfig = {}) {
+    this.projectRoot = path.resolve(config.projectRoot || process.cwd());
+    this.autoApprove = config.autoApprove ?? false;
+    this.screenshotMode = config.screenshotMode ?? "none";
     this.designerDir = path.join(this.projectRoot, ".designer");
     this.canvasFilePath = path.join(this.designerDir, "canvas.json");
+    this.appliedFilePath = path.join(this.designerDir, "applied.json");
 
     this.store = new FlatStore();
     this.claimRegistry = new ClaimRegistry(config.ttlMs ?? 300_000);
@@ -83,118 +69,197 @@ export class OpenDesignerService extends Service {
       provider: config.modelProvider || "deepseek",
       ...config.aiConfig
     });
-
-    // 若运行在 Cordis 微内核宿主环境，注册 38 个 MCP 工具到 DSH tools 服务
-    if (this.ctx && this.ctx.tools) {
-      this.mountDshTools(this.ctx.tools);
-    }
+    this.checkpoints = new CheckpointLog(path.join(this.designerDir, "checkpoints.json"));
+    this.batches = new AgentBatchRegistry(
+      this.projectRoot,
+      path.join(this.designerDir, "batches.json")
+    );
   }
 
-  /**
-   * 将 38 个 MCP 工具挂载为 DSH 原生 Tool
-   */
-  public mountDshTools(toolsService: NonNullable<Context["tools"]>): void {
-    const registerFn =
-      typeof toolsService.defineTool === "function"
-        ? toolsService.defineTool.bind(toolsService)
-        : typeof toolsService.register === "function"
-          ? toolsService.register.bind(toolsService)
-          : null;
-
-    if (!registerFn) return;
-
-    for (const tool of OPEN_DESIGNER_TOOLS) {
-      registerFn({
-        name: tool.name,
-        description: tool.description,
-        category: tool.category,
-        parameters: tool.parameters,
-        execute: async (args: Record<string, any>) => {
-          return await this.executeTool(tool.name, args);
-        }
-      });
-    }
+  public fileIoRoot(): string {
+    const open = this.batches.openBatch();
+    if (!open) return this.projectRoot;
+    return this.batches.worktreeAbs(open);
   }
 
-  /**
-   * Cordis 服务启动生命周期钩子
-   */
   public async start(): Promise<void> {
     await this.init();
-    if (this.ctx && this.ctx.tools) {
-      this.mountDshTools(this.ctx.tools);
-    }
   }
 
-  /**
-   * Cordis 服务停止生命周期钩子
-   */
   public async stop(): Promise<void> {
     await this.saveCanvas();
   }
 
-  /**
-   * 初始化服务，加载现有画布
-   */
   public async init(): Promise<void> {
     if (this.isInitialized) return;
     await this.loadCanvas();
+    await this.checkpoints.load();
+    await this.batches.load();
+    try {
+      const applied = JSON.parse(await fs.readFile(this.appliedFilePath, "utf-8")) as {
+        appliedAt?: string;
+      };
+      this.lastAppliedAt = applied.appliedAt ?? null;
+    } catch {
+      this.lastAppliedAt = null;
+    }
+    if (this.checkpoints.entries.length === 0) {
+      await this.pushCheckpoint({ label: "baseline", kind: "canvas" });
+    }
     this.isInitialized = true;
   }
 
-  /**
-   * 从本地 .designer/canvas.json 加载画布
-   */
+  public status(): Record<string, unknown> {
+    const current = this.checkpoints.current();
+    const open = this.batches.openBatch();
+    return {
+      name: "dsh-opendesigner",
+      requiredDsh: REQUIRED_DSH_RELEASE,
+      projectRoot: this.projectRoot,
+      fileIoRoot: this.fileIoRoot(),
+      autoApprove: this.autoApprove,
+      screenshotMode: this.screenshotMode,
+      toolCount: OPEN_DESIGNER_TOOLS.length,
+      ai: {
+        ...this.aiGateway.status(),
+        liveProviders: liveProvidersStatus()
+      },
+      persistence: {
+        workingCopy: ".designer/canvas.json",
+        lastAutosaveAt: this.lastAutosaveAt,
+        lastAppliedAt: this.lastAppliedAt,
+        checkpointCount: this.checkpoints.entries.length,
+        currentCheckpointId: current?.id ?? null,
+        currentCheckpointLabel: current?.label ?? null,
+        openBatchId: open?.batchId ?? null,
+        openBatchWorktree: open?.worktreeRelPath ?? null,
+        batches: this.batches.batches.map((batch) => ({
+          batchId: batch.batchId,
+          status: batch.status,
+          branch: batch.branch,
+          isolation: batch.isolation
+        })),
+        gitCommitOnAutosave: false
+      }
+    };
+  }
+
   public async loadCanvas(): Promise<boolean> {
     try {
       const raw = await fs.readFile(this.canvasFilePath, "utf-8");
       const data = JSON.parse(raw);
       this.store.fromJSON(data);
+      this.lastAutosaveAt = typeof data.savedAt === "string" ? data.savedAt : null;
       return true;
     } catch {
-      // 文件不存在或损坏，使用空白 Store
       return false;
     }
   }
 
-  /**
-   * 原子持久化到本地 .designer/canvas.json
-   * 机制：先写入临时文件 .designer/canvas.json.tmp，然后原子 rename 覆盖
-   */
-  public async saveCanvas(): Promise<void> {
-    await fs.mkdir(this.designerDir, { recursive: true });
-    const tmpPath = `${this.canvasFilePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-    const serialized = JSON.stringify(this.store.toJSON(), null, 2);
-
-    await fs.writeFile(tmpPath, serialized, "utf-8");
-    await fs.rename(tmpPath, this.canvasFilePath);
+  public hydrateStore(data: unknown): void {
+    this.store.fromJSON(data);
   }
 
-  /**
-   * 获取本地 Git 工作区同步状态
-   * 严格遵守安全红线：完全隔离全局与外部配置，仅检查当前 projectRoot
-   */
+  public async saveCanvas(): Promise<void> {
+    const savedAt = new Date().toISOString();
+    await atomicWriteJson(this.canvasFilePath, {
+      ...this.store.toJSON(),
+      savedAt
+    });
+    this.lastAutosaveAt = savedAt;
+  }
+
+  public async captureSourceFiles(): Promise<Record<string, string>> {
+    const files: Record<string, string> = {};
+    const root = this.fileIoRoot();
+    for (const rel of this.sessionTouched) {
+      try {
+        const abs = resolveProjectPath(root, rel);
+        files[rel] = await fs.readFile(abs, "utf-8");
+      } catch {
+        // File was deleted or never written.
+      }
+    }
+    return files;
+  }
+
+  public async restoreSourceFiles(files?: Record<string, string>): Promise<void> {
+    if (!files) return;
+    const root = this.fileIoRoot();
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = resolveProjectPath(root, rel);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await atomicWriteFile(abs, content);
+    }
+  }
+
+  public async pushCheckpoint(input: { label: string; kind?: CheckpointKind }): Promise<unknown> {
+    const sourceFiles = await this.captureSourceFiles();
+    const checkpoint = await this.checkpoints.push({
+      label: input.label,
+      kind: input.kind ?? (Object.keys(sourceFiles).length > 0 ? "session" : "canvas"),
+      store: this.store.toJSON(),
+      sourceFiles: Object.keys(sourceFiles).length > 0 ? sourceFiles : undefined
+    });
+    return {
+      success: true,
+      checkpoint: {
+        id: checkpoint.id,
+        createdAt: checkpoint.createdAt,
+        label: checkpoint.label,
+        kind: checkpoint.kind
+      },
+      cursor: this.checkpoints.cursor,
+      count: this.checkpoints.entries.length,
+      worktreeCreated: false
+    };
+  }
+
+  public async rewind(checkpointId?: string): Promise<unknown> {
+    const checkpoint = checkpointId
+      ? await this.checkpoints.rewindTo(checkpointId)
+      : await this.checkpoints.rewind();
+    this.store.fromJSON(checkpoint.store);
+    await this.restoreSourceFiles(checkpoint.sourceFiles);
+    await this.saveCanvas();
+    return {
+      success: true,
+      checkpoint: {
+        id: checkpoint.id,
+        createdAt: checkpoint.createdAt,
+        label: checkpoint.label,
+        kind: checkpoint.kind
+      },
+      store: this.store.toJSON(),
+      sourceFiles: checkpoint.sourceFiles ?? {},
+      worktreeCreated: false
+    };
+  }
+
+  public async applyToProject(): Promise<unknown> {
+    await this.saveCanvas();
+    const current = this.checkpoints.current();
+    const appliedAt = new Date().toISOString();
+    await atomicWriteJson(this.appliedFilePath, {
+      appliedAt,
+      checkpointId: current?.id ?? null,
+      gitCommit: false
+    });
+    this.lastAppliedAt = appliedAt;
+    return {
+      success: true,
+      appliedAt,
+      checkpointId: current?.id ?? null,
+      workingCopy: ".designer/canvas.json",
+      gitCommit: false
+    };
+  }
+
   public async getGitStatus(): Promise<GitSyncStatus> {
     try {
-      const env = {
-        ...process.env,
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_CONFIG_SYSTEM: "/dev/null",
-        XDG_CONFIG_HOME: "/dev/null"
-      };
-      const { stdout: branchOut } = await execFileAsync(
-        "git",
-        ["rev-parse", "--abbrev-ref", "HEAD"],
-        { cwd: this.projectRoot, env }
-      );
+      const { stdout: branchOut } = await git(this.projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
       const branch = branchOut.trim();
-
-      const { stdout: statusOut } = await execFileAsync(
-        "git",
-        ["status", "--porcelain"],
-        { cwd: this.projectRoot, env }
-      );
-
+      const { stdout: statusOut } = await git(this.projectRoot, ["status", "--porcelain"]);
       const lines = statusOut.split("\n").filter((l) => l.trim().length > 0);
       const modifiedFiles = lines.map((l) => l.slice(3).trim());
       const canvasTracked = lines.some((l) => l.includes(".designer/canvas.json"));
@@ -216,62 +281,130 @@ export class OpenDesignerService extends Service {
     }
   }
 
-  /**
-   * 本地 Git 工作区同步：暂存 .designer/canvas.json 并生成原子变更记录
-   */
   public async syncGitWorkspace(options: { stageCanvas?: boolean } = {}): Promise<GitSyncStatus> {
-    // 确保最新状态已持久化到磁盘
     await this.saveCanvas();
 
     if (options.stageCanvas) {
       try {
-        const env = {
-          ...process.env,
-          GIT_CONFIG_GLOBAL: "/dev/null",
-          GIT_CONFIG_SYSTEM: "/dev/null",
-          XDG_CONFIG_HOME: "/dev/null"
-        };
-        await execFileAsync("git", ["add", ".designer/canvas.json"], {
-          cwd: this.projectRoot,
-          env
-        });
+        await git(this.projectRoot, ["add", "-f", ".designer/canvas.json"]);
       } catch {
-        // 非 Git 仓库或暂存失败时静默跳过
+        // Non-git trees skip staging. Autosave never calls this.
       }
     }
 
     return await this.getGitStatus();
   }
 
-  /**
-   * 执行 38 个 MCP 工具调度
-   */
   public async executeTool(toolName: string, args: Record<string, any> = {}): Promise<any> {
-    const context: MCPContext = {
-      projectRoot: this.projectRoot,
-      store: this.store,
-      claims: this.claimRegistry,
-      autoApprove: this.autoApprove,
-      saveCanvas: () => this.saveCanvas()
-    };
+    await this.init();
+    const persistCtx = { autoApprove: this.autoApprove };
 
-    return await dispatchMCPTool(toolName, args, context);
+    try {
+      if (PERSISTENCE_TOOL_NAMES.has(toolName)) {
+        assertPersistApproval(toolName, persistCtx, args);
+        return await this.executePersistTool(toolName, args);
+      }
+
+      const context: MCPContext = {
+        projectRoot: this.fileIoRoot(),
+        store: this.store,
+        claims: this.claimRegistry,
+        autoApprove: this.autoApprove,
+        screenshotMode: this.screenshotMode,
+        saveCanvas: () => this.saveCanvas()
+      };
+
+      const result = await dispatchMCPTool(toolName, args, context);
+      this.trackSessionWrites(toolName, args, result);
+      if (CANVAS_MUTATION_TOOLS.has(toolName) && result?.success !== false) {
+        await this.pushCheckpoint({ label: toolName, kind: "canvas" });
+      } else if (SOURCE_MUTATION_TOOLS.has(toolName) && result?.success !== false) {
+        await this.pushCheckpoint({ label: toolName, kind: "source" });
+      }
+      return result;
+    } catch (err) {
+      if (
+        err instanceof PathJailError ||
+        err instanceof ApprovalRequiredError ||
+        err instanceof GitRequiredError ||
+        err instanceof BatchError
+      ) {
+        return { success: false, error: err.message, code: err.code };
+      }
+      if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
+        const code = (err as { code: string }).code;
+        if (code === "NOTHING_TO_REWIND" || code === "CHECKPOINT_NOT_FOUND") {
+          return { success: false, error: err instanceof Error ? err.message : String(err), code };
+        }
+        if (code === "ENOENT") {
+          return { success: false, error: err instanceof Error ? err.message : String(err), code: "NOT_FOUND" };
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async executePersistTool(toolName: string, args: Record<string, any>): Promise<unknown> {
+    switch (toolName) {
+      case "checkpoint":
+        return await this.pushCheckpoint({
+          label: String(args.label || "checkpoint"),
+          kind: args.kind === "source" || args.kind === "session" ? args.kind : "canvas"
+        });
+      case "rewind":
+        return await this.rewind(typeof args.checkpointId === "string" ? args.checkpointId : undefined);
+      case "list_checkpoints":
+        return {
+          success: true,
+          checkpoints: this.checkpoints.list(),
+          cursor: this.checkpoints.cursor
+        };
+      case "autosave":
+        await this.saveCanvas();
+        return {
+          success: true,
+          path: ".designer/canvas.json",
+          savedAt: this.lastAutosaveAt,
+          gitCommit: false
+        };
+      case "apply_to_project":
+        return await this.applyToProject();
+      case "batch_create":
+        return {
+          success: true,
+          ...(await this.batches.create(typeof args.label === "string" ? args.label : undefined))
+        };
+      case "batch_discard":
+        return { success: true, ...(await this.batches.discard(String(args.batchId || ""))) };
+      case "batch_apply":
+        return { success: true, ...(await this.batches.apply(String(args.batchId || ""))) };
+      default:
+        throw new Error(`Unknown persistence tool: ${toolName}`);
+    }
+  }
+
+  private trackSessionWrites(
+    toolName: string,
+    args: Record<string, any>,
+    result: { success?: boolean } | undefined
+  ): void {
+    if (!SOURCE_MUTATION_TOOLS.has(toolName) || result?.success === false) return;
+    if (toolName === "project_write_batch") {
+      for (const file of args.files || []) {
+        if (typeof file?.path === "string") this.sessionTouched.add(file.path);
+      }
+      return;
+    }
+    if (typeof args.path === "string") this.sessionTouched.add(args.path);
   }
 }
 
-/**
- * DSH 插件规范导出
- */
-export const name = "dsh-opendesigner";
-export const inject = ["tools"];
-
-export function apply(ctx: Context, config: OpenDesignerConfig = {}): OpenDesignerService {
-  return new OpenDesignerService(ctx, config);
-}
-
-export default OpenDesignerService;
-
-export * from "./cordis.ts";
 export * from "./claimRegistry.ts";
 export * from "./mcpTools.ts";
 export * from "./aiGateway.ts";
+export * from "./pathJail.ts";
+export * from "./approval.ts";
+export * from "./checkpoints.ts";
+export * from "./agentBatch.ts";
+export * from "./persistenceTools.ts";
+export * from "./atomicWrite.ts";

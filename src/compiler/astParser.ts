@@ -765,7 +765,6 @@ export interface Visitor {
   JSXClosingElement?: (path: NodePath<JSXClosingElementNode>) => void;
   Program?: (path: NodePath<ProgramNode>) => void;
   enter?: (path: NodePath) => void;
-  [key: string]: VisitorFunction | undefined;
 }
 
 export function traverseAST(ast: BaseNode, visitor: Visitor, parent: BaseNode | null = null): void {
@@ -775,7 +774,7 @@ export function traverseAST(ast: BaseNode, visitor: Visitor, parent: BaseNode | 
     visitor.enter(path);
   }
 
-  const handler = visitor[ast.type];
+  const handler = (visitor as Record<string, VisitorFunction | undefined>)[ast.type];
   if (typeof handler === "function") {
     handler(path);
   }

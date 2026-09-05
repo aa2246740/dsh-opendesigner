@@ -13,10 +13,15 @@ export * from "./stylesPanel.ts";
 export * from "./sandbox.ts";
 export * as NextShims from "./next-shims/index.ts";
 
-import { InfiniteCanvasViewport } from "./canvas.ts";
+import {
+  CanvasInteractionController,
+  CanvasPanel,
+  InfiniteCanvasViewport,
+  SelectionOverlayRenderer
+} from "./canvas/index.ts";
 import { SelectionManager } from "./selection.ts";
 import { ComponentSandbox } from "./sandbox.ts";
-import { CanvasPanel } from "./canvas/index.ts";
+import { worldToScreen } from "./geometry.ts";
 import { FlatStore } from "../store/flatStore.ts";
 
 export interface DesignerClientState {
@@ -55,10 +60,14 @@ if (typeof window !== "undefined") {
         name: "dsh-opendesigner",
         version: "0.1.0",
         init: initDesignerClient,
+        initDesignerClient,
         InfiniteCanvasViewport,
         SelectionManager,
         ComponentSandbox,
-        CanvasPanel
+        CanvasPanel,
+        CanvasInteractionController,
+        SelectionOverlayRenderer,
+        worldToScreen
       })
     });
   }

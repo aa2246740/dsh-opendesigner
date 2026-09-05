@@ -5,6 +5,7 @@
  */
 
 import type { Point, Rect, ResizeHandle } from "../geometry.ts";
+import { rectFromPoints } from "../geometry.ts";
 import type { SnapGuide } from "../snapping.ts";
 import { SelectionManager } from "../selection.ts";
 import { InfiniteCanvasViewport } from "./viewport.ts";
@@ -23,6 +24,7 @@ export class CanvasInteractionController {
   private selection: SelectionManager;
   private dragSession: DragSession | null = null;
   private currentGuides: SnapGuide[] = [];
+  private marqueeRect: Rect | null = null;
 
   // 事件回调列表
   private onGuidesChangeCallbacks: ((guides: SnapGuide[]) => void)[] = [];
@@ -68,6 +70,40 @@ export class CanvasInteractionController {
     for (const cb of this.onGuidesChangeCallbacks) {
       cb(guides);
     }
+  }
+
+  public getMarqueeRect(): Rect | null {
+    return this.marqueeRect ? { ...this.marqueeRect } : null;
+  }
+
+  /**
+   * Empty-canvas rubber-band. World-space rect is used for intersection hit-testing.
+   */
+  public startBoxSelect(screenPoint: Point): void {
+    const worldP = this.viewport.toWorld(screenPoint);
+    this.setMode("box-selecting");
+    this.dragSession = {
+      startScreenPoint: { ...screenPoint },
+      startWorldPoint: worldP,
+      initialBox: { left: worldP.x, top: worldP.y, width: 0, height: 0 }
+    };
+    this.marqueeRect = { left: worldP.x, top: worldP.y, width: 0, height: 0 };
+  }
+
+  public updateBoxSelect(screenPoint: Point): Rect | null {
+    if (this.mode !== "box-selecting" || !this.dragSession) return null;
+    const currentWorld = this.viewport.toWorld(screenPoint);
+    this.marqueeRect = rectFromPoints(this.dragSession.startWorldPoint, currentWorld);
+    return { ...this.marqueeRect };
+  }
+
+  public endBoxSelect(): Rect | null {
+    if (this.mode !== "box-selecting") return null;
+    const rect = this.marqueeRect ? { ...this.marqueeRect } : null;
+    this.marqueeRect = null;
+    this.dragSession = null;
+    this.setMode("idle");
+    return rect;
   }
 
   /**

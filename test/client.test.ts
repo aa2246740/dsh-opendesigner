@@ -6,7 +6,10 @@ import {
   CanvasAffineMatrix,
   companionGeometry,
   multiResize,
-  computeBoundingBox
+  computeBoundingBox,
+  MIN_ELEMENT_SIZE,
+  rectFromPoints,
+  rectsIntersect
 } from "../src/client/geometry.ts";
 import { compute6LineSnapping } from "../src/client/snapping.ts";
 import { Image } from "../src/client/next-shims/image.ts";
@@ -73,10 +76,18 @@ describe("Client - 8-Direction Companion Geometry & Multi-Resize", () => {
     assert.equal(res.left, 100);
   });
 
-  it("should clamp minimum dimension to 1px", () => {
+  it("should clamp minimum dimension to the designed 8px product floor", () => {
     const res = companionGeometry(startRect, "se", -500, -500);
-    assert.equal(res.width, 1);
-    assert.equal(res.height, 1);
+    assert.equal(res.width, MIN_ELEMENT_SIZE);
+    assert.equal(res.height, MIN_ELEMENT_SIZE);
+    assert.equal(MIN_ELEMENT_SIZE, 8);
+  });
+
+  it("should build a rubber-band rect and detect intersections", () => {
+    const band = rectFromPoints({ x: 120, y: 80 }, { x: 10, y: 20 });
+    assert.deepEqual(band, { left: 10, top: 20, width: 110, height: 60 });
+    assert.equal(rectsIntersect(band, { left: 40, top: 30, width: 40, height: 40 }), true);
+    assert.equal(rectsIntersect(band, { left: 200, top: 30, width: 40, height: 40 }), false);
   });
 
   it("should scale multiple elements proportionally in group resize", () => {

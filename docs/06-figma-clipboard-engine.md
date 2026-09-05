@@ -1,3 +1,5 @@
+> **Status.** Historical notes. Not the shipped product spec. Do not use this file as an implementation checklist. Do not extend reverse-engineered protocol detail from it. See [README](../README.md) and [SHIPPED.md](./SHIPPED.md).
+
 # 06. Figma Kiwi 二进制剪贴板协议解析与 Tailwind 映射
 
 ---

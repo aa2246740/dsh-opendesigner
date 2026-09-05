@@ -1,3 +1,5 @@
+> **Status.** Historical notes. Not the shipped product spec. Do not use this file as an implementation checklist. Do not extend reverse-engineered protocol detail from it. See [README](../README.md) and [SHIPPED.md](./SHIPPED.md).
+
 # 02. 本地 MCP 服务端与全量 38 个工具协议规约
 
 ---
@@ -34,7 +36,7 @@ Lunagraph 在主进程中启动了一个原生的 HTTP MCP 服务端（`src/main
 
 ```markdown
 # 动态注入的全局 Rules 摘要
-1. 强制依赖设计规范技能：在执行任何画布增删改操作前，必须先调用 read_skill({ name: "lunagraph-design" })。
+1. Call `read_skill({ name: "opendesigner-design" })` before canvas mutations in this plugin. Historical Lunagraph skill names are not used.
 2. 注入当前项目 CSS 变量与设计令牌摘要（提取自 globals.css）：包含色彩系统、Radius、阴影规范等。
 3. 并发锁定规约：严禁在未成功取得 canvas_claim 锁的情况下调用 canvas_edit / canvas_update。
 4. 视觉验收闭环：每次完成画布编辑后，必须调用 take_screenshot 自检，否则 canvas_release 将拒绝释放锁。
@@ -105,7 +107,7 @@ Lunagraph 在主进程中启动了一个原生的 HTTP MCP 服务端（`src/main
 
 | 工具名称 | 功能描述 |
 |---|---|
-| `list_skills` | 列出内置的工作流技能规约（`lunagraph-design`, `lunagraph-import-from-project`, `lunagraph-compositions`）。 |
+| `list_skills` | 列出内置工作流技能（现为 `opendesigner-design`, `opendesigner-import-from-project`, `opendesigner-compositions`）。 |
 | `read_skill` | 读取指定技能的 Markdown 说明文档，指导 Agent 按照系统最佳实践进行布局与代码生成。 |
 
 ---

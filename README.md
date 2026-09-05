@@ -1,58 +1,106 @@
 # dsh-opendesigner
 
-> **An open-source, multi-model, local-first visual React component designer for DeepSeek Harness.**  
-> 致力于打破 Lunagraph 的 Claude 闭源绑定，提供完全自主、本地优先、无缝 Git 协作的视觉化代码设计器。
+A DeepSeek Harness plugin for local-first visual editing of React + Tailwind components.
 
----
+It is an out-of-tree Cordis plugin. It does not patch DeepSeek Harness. File tools stay inside the project root. Destructive writes need an explicit `approve: true` unless you set `autoApprove` (that flag never widens the jail).
 
-## 🌟 核心理念与技术哲学
+## Required host
 
-1. **Zero Handoff（代码即画布）**：
-   画布中呈现的是真实的 React 19 节点与 Tailwind CSS 样式，而非基于 SVG/Canvas 的矢量模拟。所见即所写，所改即所得。
-2. **双层往返编译（Round-trip Surgical Codegen）**：
-   - **Tier 1 确定性 AST 切片（Deterministic Slicing）**：修改类名（Tailwind Token）和行内样式时，基于 Babel AST 定位并在源码字节偏移处就地替换，零 AI 延迟、零 Token 消耗、100% 保持源码格式与注释。
-   - **Tier 2 AI 结构化合并（AI Merge）**：对于包含复杂逻辑、Hooks、动态表达式的重构，由多模型以 JSON Schema 补丁形式精准合成源码。
-3. **DeepSeek Harness 原生驱动**：
-   作为 DSH 的独立插件系统运行，支持 Cordis 依赖注入与生命周期管理，Web 客户端采用动态模块加载机制。
-4. **多模型自由适配（Decoupled Any-Model Layer）**：
-   解除官方仅绑定 Claude 的限制，原生支持 DeepSeek-V3 / R1、OpenAI GPT-4o、本地 Ollama/vLLM 以及自定义 API 端点。
-5. **本地优先与纯粹的 Git 协同（Local-First & Git-Native）**：
-   不依赖任何云端数据库，画布状态与项目源码完全存储于本地磁盘，版本控制由本地 Git 原生驱动。
+This package targets published **DeepSeek Harness 0.1.2-rc.1**. Use that CLI and the matching `@deepseek-ai/dsh-tools@0.1.2-rc.1` peer. Do not patch DSH core. Node 22.14 or newer.
 
----
+Peer range in `package.json`: `@deepseek-ai/dsh-tools` `0.1.2-rc.1`, `@deepseek-ai/cordis` `^4.0.2`.
 
-## 📚 深度逆向技术全书与设计规范 (`docs/`)
+## What ships
 
-本项目基于对 Lunagraph 客户端与编译器源码的完整逆向工程，建立了体系化的技术文档库：
+- Host plugin: `apply` / `name` / `inject = ["tools"]` plus `dsh.bundle.patch`.
+- Jailed project/local file tools.
+- In-session checkpoints and Rewind for canvas plus applied source edits.
+- Working-copy autosave at `.designer/canvas.json` (atomic write, crash safety, not version history).
+- Optional git worktree isolation for an Agent source batch under `.designer/worktrees/<batchId>`.
+- Explicit Save / Apply to project. Timed autosave never `git commit`.
+- Deterministic Tailwind class slicing (`src/compiler/sourceEdit.ts`) and an OpenAI-compatible AI merge client.
+- A live preview (`npm run preview`) that mounts `CanvasPanel`, not a static marketing mock.
 
-- [01. 总体架构与设计心智模型](./docs/01-architecture-and-mental-model.md)
-- [02. 本地 MCP 服务端与全量 38 个工具协议规约](./docs/02-mcp-protocol-and-38-tools.md)
-- [03. 双层代码编译器与 AST 就地切片修改机制](./docs/03-ast-compiler-and-codegen.md)
-- [04. 关系型扁平组件状态库 (Flat Store) 规范](./docs/04-flat-store-specification.md)
-- [05. 无限画布几何变换、6线智能吸附与多选缩放算法](./docs/05-canvas-geometry-and-interaction.md)
-- [06. Figma Kiwi 二进制剪贴板协议解析与 Tailwind 映射](./docs/06-figma-clipboard-engine.md)
-- [07. 浏览器端 Next.js 离线沙箱与 next-shims 垫片解析](./docs/07-runtime-sandbox-and-next-shims.md)
-- [08. 基于 DeepSeek Harness 的系统重写与模块落地蓝图](./docs/08-dsh-rewrite-blueprint.md)
+## What does not ship
 
----
+- Lunagraph parity, Figma Kiwi clipboard fidelity, or a React 19 runtime.
+- An HTTP MCP server on port 21209.
+- A 1x1 PNG that marks canvas claims as visually verified. `take_screenshot` fails closed unless you attach a renderer or set `screenshotMode: "jsx-svg"` (a serialization snapshot, not pixels).
+- A `dsh.client` web-shell plugin. The canvas lives in `npm run preview`. Declaring `dsh.client` against `lib/client.js` would fail host boot.
 
-## 🏗️ 目录拓扑
+`docs/01` through `docs/07` are historical notes. Do not treat them as the product spec. See [docs/SHIPPED.md](docs/SHIPPED.md).
 
-```tree
-dsh-opendesigner/
-├── docs/                        # 完整逆向全书与规范文档 (8篇)
-├── src/
-│   ├── compiler/                # Babel AST 切片修改与代码合并引擎
-│   ├── store/                   # 关系型扁平 AST 状态树 (byId / 索引模型)
-│   ├── server/                  # DSH 后端服务与 MCP 38 个工具适配器
-│   └── client/                  # DSH Web Client 画布视图与交互面板
-├── package.json
-├── tsconfig.json
-└── README.md
+## Install on DeepSeek Harness 0.1.2-rc.1
+
+Record the version you boot. It must print `0.1.2-rc.1`.
+
+```sh
+npx @deepseek-ai/dsh@0.1.2-rc.1 --version
+export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+npx @deepseek-ai/dsh@0.1.2-rc.1 plugin --profile web add "$(pwd)"
+npx @deepseek-ai/dsh@0.1.2-rc.1 --profile web --dump-config
+npx @deepseek-ai/dsh@0.1.2-rc.1 web --no-open
 ```
 
----
+`dump-config` must contain a `# == dsh-opendesigner` layer. Settings → Plugins must list the plugin as Enabled.
 
-## 🛡️ 环境安全承诺
+The bundle patch inserts id `dsh-opendesigner`. Host tools are registered with `ctx.tools.register(defineTool(...))` as `opendesigner_*` (for example `opendesigner_status`, `opendesigner_canvas_list`, `opendesigner_project_read`). `output.schema` is JSON Schema. `opendesigner_status` reports `requiredDsh: "0.1.2-rc.1"` and `hasApiKey` only, never key values.
 
-本项目为完全自包含的独立仓库，遵循极简与隔离设计，运行与构建过程中严格限定在当前工程目录内，不侵入、不干扰宿主环境中的其他系统服务或现有应用。
+Scratch overlay while developing against a source checkout:
+
+```yaml
+- insert:
+    - id: dsh-opendesigner
+      name: /absolute/path/to/dsh-opendesigner/dist/plugin.js
+```
+
+```sh
+pnpm dsh web --patch /absolute/path/to/overlay.yml
+```
+
+## Preview
+
+```sh
+npm install
+npm run build
+npm test
+npm run preview
+```
+
+Open `http://127.0.0.1:4173/`. Use **Fill emerald** or **Radius xl** for a deterministic className edit, then **Rewind**. Use **Create batch** / **Write batch file** / **Apply batch** or **Discard batch** for the Agent-batch path. **AI merge** is live-only unless you set `OPENDESIGNER_FORCE_MOCK=1`.
+
+## AI gateway
+
+Safe default: mock mode when no API key is configured. Preview and `apply()` try live providers in this order when keys exist:
+
+1. `OPENROUTER_ONLYUSE_FREEMODEL_API_KEY` or `OPENROUTER_API_KEY`
+2. `MINIMAXCN_API_KEY` or `MINIMAX_CN_API_KEY`
+3. `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+4. `DEEPSEEK_API_KEY`
+5. `OPENAI_API_KEY`
+6. `GLM_CN_API_KEY`
+
+Override model with `OPENROUTER_MODEL`, `MINIMAX_MODEL`, or `GEMINI_MODEL`. Never put keys in the repo. `status()` reports `hasApiKey` only.
+
+Ollama has no key. Set `aiConfig.mockMode` to `false` and point `baseURL` at your local server.
+
+## Save, Rewind, and Agent batches
+
+Git worktrees isolate an Agent source batch. They are not Rewind, and they are not created per style tweak.
+
+| Layer | What it does | Git? |
+|---|---|---|
+| Checkpoints / Rewind | In-session stack of canvas + session source overlay. `opendesigner_rewind` restores a checkpoint. | Not required |
+| Working-copy autosave | Atomic write to `.designer/canvas.json`. Crash safety only. | Not required. Never commits. |
+| Agent batch worktree | `opendesigner_batch_create` adds a jailed worktree under `.designer/worktrees/<batchId>`. Discard removes it. Apply copies files back, then removes it. | Required. Without git, the tool returns `GIT_REQUIRED`. Layers above still work. |
+| Save / Apply to project | `opendesigner_apply_to_project` stamps `.designer/applied.json` after an explicit approve. | Never silent `git commit`. |
+
+Approval: canvas style and geometry tools are auto-allowed. Applying source writes, `apply_to_project`, and `batch_apply` stay gated. `autoApprove` does not widen the path jail.
+
+## Path jail
+
+`project_*` and `local_*` resolve through `resolveProjectPath`. Absolute paths and `..` escape are errors (`PATH_JAIL`). `local_*` is the same jail as `project_*`. There is no host-wide filesystem.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
