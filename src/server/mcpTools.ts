@@ -12,6 +12,7 @@ import { applySurgicalEdits } from "../compiler/aiMerge.ts";
 import { assertDestructiveApproval } from "./approval.ts";
 import { snapshotJsxAsSvgDataUrl } from "./jsxSnapshot.ts";
 import { PathJailError, resolveProjectPath } from "./pathJail.ts";
+import { copyFileNoFollow, readTextNoFollow, unlinkNoFollow, writeFileNoFollow } from "./fileBytes.ts";
 
 export interface MCPToolDefinition {
   name: string;
@@ -28,6 +29,7 @@ export interface MCPContext {
   store: FlatStore;
   claims: ClaimRegistry;
   autoApprove?: boolean;
+  approvalGranted?: boolean;
   approvalChannel?: "host" | "model";
   screenshotMode?: ScreenshotMode;
   captureScreenshot?: (elementId: string) => Promise<string | null>;
@@ -508,11 +510,12 @@ async function getFilesRecursively(dir: string, baseDir: string = dir): Promise<
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (entry.name === "node_modules" || entry.name === ".git") continue;
+      if (entry.isSymbolicLink()) continue;
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         const subFiles = await getFilesRecursively(fullPath, baseDir);
         results.push(...subFiles);
-      } else {
+      } else if (entry.isFile()) {
         results.push(path.relative(baseDir, fullPath));
       }
     }
@@ -562,7 +565,7 @@ export async function dispatchMCPTool(
 
     case "project_read": {
       const targetPath = projectFile(ctx, args.path);
-      const content = await fs.readFile(targetPath, "utf-8");
+      const content = await readTextNoFollow(targetPath);
       const lines = content.split("\n");
       const offset = args.offset || 0;
       const limit = args.limit || lines.length;
@@ -587,7 +590,8 @@ export async function dispatchMCPTool(
       for (const rel of files) {
         if (args.pathPrefix && !rel.startsWith(args.pathPrefix)) continue;
         try {
-          const content = await fs.readFile(path.join(projectRoot, rel), "utf-8");
+          const targetPath = resolveProjectPath(projectRoot, rel);
+          const content = await readTextNoFollow(targetPath);
           const lines = content.split("\n");
           for (let i = 0; i < lines.length; i++) {
             if (regex.test(lines[i])) {
@@ -603,8 +607,7 @@ export async function dispatchMCPTool(
 
     case "project_write": {
       const targetPath = projectFile(ctx, args.path);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, args.content, "utf-8");
+      await writeFileNoFollow(targetPath, String(args.content ?? ""));
       return { success: true, path: args.path };
     }
 
@@ -612,8 +615,7 @@ export async function dispatchMCPTool(
       const written: string[] = [];
       for (const f of args.files || []) {
         const targetPath = projectFile(ctx, f.path);
-        await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        await fs.writeFile(targetPath, f.content, "utf-8");
+        await writeFileNoFollow(targetPath, String(f.content ?? ""));
         written.push(f.path);
       }
       return { written };
@@ -621,7 +623,7 @@ export async function dispatchMCPTool(
 
     case "project_edit": {
       const targetPath = projectFile(ctx, args.path);
-      const content = await fs.readFile(targetPath, "utf-8");
+      const content = await readTextNoFollow(targetPath);
       const res = applySurgicalEdits(content, [
         {
           old_string: args.old_string,
@@ -632,28 +634,27 @@ export async function dispatchMCPTool(
       if (!res.success) {
         return { success: false, error: res.error };
       }
-      await fs.writeFile(targetPath, res.result!, "utf-8");
+      await writeFileNoFollow(targetPath, res.result!);
       return { success: true };
     }
 
     case "project_delete": {
       const targetPath = projectFile(ctx, args.path);
-      await fs.unlink(targetPath);
+      await unlinkNoFollow(targetPath);
       return { success: true };
     }
 
     case "project_copy_asset": {
       const src = projectFile(ctx, args.sourcePath);
       const dest = projectFile(ctx, args.targetPath);
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.copyFile(src, dest);
+      await copyFileNoFollow(src, dest);
       return { success: true };
     }
 
     // --- 类别 2: Local Filesystem Tools ---
     case "local_read": {
       const targetPath = projectFile(ctx, args.path);
-      const content = await fs.readFile(targetPath, "utf-8");
+      const content = await readTextNoFollow(targetPath);
       return { content };
     }
 
@@ -662,7 +663,7 @@ export async function dispatchMCPTool(
       for (const p of args.paths || []) {
         try {
           const targetPath = projectFile(ctx, p);
-          results[p] = await fs.readFile(targetPath, "utf-8");
+          results[p] = await readTextNoFollow(targetPath);
         } catch {
           results[p] = "";
         }
@@ -672,14 +673,13 @@ export async function dispatchMCPTool(
 
     case "local_write": {
       const targetPath = projectFile(ctx, args.path);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, args.content, "utf-8");
+      await writeFileNoFollow(targetPath, String(args.content ?? ""));
       return { success: true };
     }
 
     case "local_edit": {
       const targetPath = projectFile(ctx, args.path);
-      const content = await fs.readFile(targetPath, "utf-8");
+      const content = await readTextNoFollow(targetPath);
       const res = applySurgicalEdits(content, [
         {
           old_string: args.old_string,
@@ -688,7 +688,7 @@ export async function dispatchMCPTool(
         }
       ]);
       if (!res.success) return { success: false, error: res.error };
-      await fs.writeFile(targetPath, res.result!, "utf-8");
+      await writeFileNoFollow(targetPath, res.result!);
       return { success: true };
     }
 
@@ -706,7 +706,7 @@ export async function dispatchMCPTool(
     case "scan_project": {
       let pkg: any = {};
       try {
-        const pkgRaw = await fs.readFile(path.join(projectRoot, "package.json"), "utf-8");
+        const pkgRaw = await readTextNoFollow(resolveProjectPath(projectRoot, "package.json"));
         pkg = JSON.parse(pkgRaw);
       } catch {
         // ignore
@@ -1036,7 +1036,7 @@ export async function dispatchMCPTool(
         const html = sandbox.renderToHtml(store, elementId);
         screenshotDataUrl = `data:text/html;base64,${Buffer.from(html, "utf8").toString("base64")}`;
         kind = "html-render";
-        visualProof = true;
+        visualProof = false;
       } else if (ctx.screenshotMode === "jsx-svg" && elementId) {
         const jsx = elementToJSX(store, elementId);
         screenshotDataUrl = snapshotJsxAsSvgDataUrl(elementId, jsx);

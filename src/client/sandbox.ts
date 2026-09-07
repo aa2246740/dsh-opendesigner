@@ -15,7 +15,68 @@ export interface RenderedNode {
 }
 
 export const SANDBOX_CSP =
-  "default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'";
+  "default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src 'self' data: https:; script-src 'none'; connect-src 'none'; object-src 'none'";
+
+export const CANVAS_TRUSTED_CSS = `
+html,body{font-family:ui-sans-serif,system-ui,sans-serif;}
+.min-h-screen{min-height:100vh;}
+.bg-slate-950{background-color:rgb(2,6,23);}
+.bg-slate-900{background-color:rgb(15,23,42);}
+.bg-indigo-600{background-color:rgb(79,70,229);}
+.bg-emerald-600{background-color:rgb(5,150,105);}
+.bg-rose-600{background-color:rgb(225,29,72);}
+.bg-amber-400{background-color:rgb(251,191,36);}
+.text-slate-100{color:rgb(241,245,249);}
+.text-slate-400{color:rgb(148,163,184);}
+.text-white{color:rgb(255,255,255);}
+.text-emerald-400{color:rgb(52,211,153);}
+.text-slate-900{color:rgb(15,23,42);}
+.text-2xl{font-size:1.5rem;line-height:2rem;}
+.text-xl{font-size:1.25rem;line-height:1.75rem;}
+.text-sm{font-size:0.875rem;line-height:1.25rem;}
+.text-xs{font-size:0.75rem;line-height:1rem;}
+.font-bold{font-weight:700;}
+.font-semibold{font-weight:600;}
+.tracking-tight{letter-spacing:-0.025em;}
+.leading-relaxed{line-height:1.625;}
+.p-8{padding:2rem;}
+.p-6{padding:1.5rem;}
+.px-4{padding-left:1rem;padding-right:1rem;}
+.py-2{padding-top:0.5rem;padding-bottom:0.5rem;}
+.mt-2{margin-top:0.5rem;}
+.mt-4{margin-top:1rem;}
+.mt-6{margin-top:1.5rem;}
+.rounded-lg{border-radius:0.5rem;}
+.rounded-xl{border-radius:0.75rem;}
+.rounded-2xl{border-radius:1rem;}
+.rounded-full{border-radius:9999px;}
+.shadow-md{box-shadow:0 4px 6px -1px rgb(0 0 0 / 0.1),0 2px 4px -2px rgb(0 0 0 / 0.1);}
+.shadow-lg{box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1),0 4px 6px -4px rgb(0 0 0 / 0.1);}
+.shadow-xl{box-shadow:0 20px 25px -5px rgb(0 0 0 / 0.1),0 8px 10px -6px rgb(0 0 0 / 0.1);}
+.border-2{border-width:2px;border-style:solid;}
+.border{border-width:1px;border-style:solid;}
+.border-indigo-500{border-color:rgb(99,102,241);}
+.w-\\[380px\\]{width:380px;}
+.inline-flex{display:inline-flex;}
+`.trim();
+
+export function collectTrustedCanvasCss(doc?: Document): string {
+  const chunks = [CANVAS_TRUSTED_CSS];
+  const target = doc ?? (typeof document !== "undefined" ? document : undefined);
+  if (!target) return chunks.join("\n");
+  for (const sheet of Array.from(target.styleSheets)) {
+    try {
+      chunks.push(...Array.from(sheet.cssRules).map((rule) => rule.cssText));
+    } catch {
+      // Cross-origin stylesheets stay out of the iframe.
+    }
+  }
+  return chunks.join("\n");
+}
+
+function sanitizeCss(css: string): string {
+  return css.replace(/<\/style/gi, "<\\/style");
+}
 
 const ALLOWED_TAGS = new Set([
   "a",
@@ -134,12 +195,13 @@ function isAllowedUrl(value: string): boolean {
   return false;
 }
 
-export function wrapSandboxSrcdoc(inner: string): string {
-  return `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"></head><body style="margin:0;background:transparent;">${inner}</body></html>`;
+export function wrapSandboxSrcdoc(inner: string, options: { css?: string } = {}): string {
+  const css = sanitizeCss(options.css ?? CANVAS_TRUSTED_CSS);
+  return `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"><style>${css}</style></head><body style="margin:0;background:transparent;">${inner}</body></html>`;
 }
 
-export function sandboxIframeMarkup(inner: string): string {
-  const srcdoc = wrapSandboxSrcdoc(inner)
+export function sandboxIframeMarkup(inner: string, options: { css?: string } = {}): string {
+  const srcdoc = wrapSandboxSrcdoc(inner, options)
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;");
   return `<iframe class="od-sandbox-frame" data-testid="component-sandbox" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${srcdoc}" style="border:0;width:100%;height:100%;pointer-events:none;background:transparent;position:absolute;inset:0;"></iframe>`;

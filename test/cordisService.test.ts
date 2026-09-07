@@ -92,6 +92,35 @@ describe("Server - DSH plugin form", () => {
     assert.doesNotThrow(() => assertSupportedJsonSchema(write.output.schema));
   });
 
+  it("asks the DSH host approval channel before minting a receipt (PR3-08)", async () => {
+    const registeredTools = new Map<string, any>();
+    const asks: string[] = [];
+    apply(
+      {
+        tools: {
+          register: (tool: any) => {
+            registeredTools.set(tool.name, tool);
+          }
+        },
+        on: (event: string, handler: (exec: unknown, next: unknown) => unknown) => {
+          if (event !== "tools/pre-execute") return;
+          const exec = { name: "opendesigner_project_write", args: { path: "src/x.tsx", content: "x" } };
+          const decision = handler(exec, () => Promise.resolve({ kind: "allow" }));
+          asks.push(event);
+          void Promise.resolve(decision).then((value) => {
+            asks.push(JSON.stringify(value));
+          });
+        }
+      },
+      { projectRoot: CORDIS_TEST_DIR, autoApprove: false }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(asks[0], "tools/pre-execute");
+    assert.match(asks[1] || "", /"kind":"ask"/);
+    assert.ok(registeredTools.has("opendesigner_project_write"));
+    assert.ok(registeredTools.has("opendesigner_accept_source_patch"));
+  });
+
   it("saves canvas on stop", async () => {
     const service = new OpenDesignerService({ projectRoot: CORDIS_TEST_DIR });
     service.store.setElement({

@@ -74,7 +74,7 @@ export const PERSISTENCE_TOOLS: MCPToolDefinition[] = [
   },
   {
     name: "batch_apply",
-    description: "应用到工程: copy jailed Agent-batch worktree file diffs into the project through a conflict-checked recoverable transaction. Refuses concurrent user edits. Never git commit. Requires host approval.",
+    description: "应用到工程: copy jailed Agent-batch worktree file diffs into the project through a conflict-checked recoverable transaction. Refuses concurrent user edits. Never git commit. Requires a host approval receipt.",
     category: "project",
     destructive: true,
     parameters: {
@@ -82,6 +82,36 @@ export const PERSISTENCE_TOOLS: MCPToolDefinition[] = [
       properties: { batchId: { type: "string", description: "Batch id" } },
       required: ["batchId"]
     }
+  },
+  {
+    name: "propose_source_patch",
+    description: "Propose a structured source-file patch bound to the selected node's file, sourceHash, and baseRevision. Does not write.",
+    category: "project",
+    parameters: {
+      type: "object",
+      properties: {
+        elementId: { type: "string" },
+        instruction: { type: "string" },
+        live: { type: "boolean" }
+      },
+      required: ["elementId", "instruction"]
+    }
+  },
+  {
+    name: "accept_source_patch",
+    description: "Apply the pending structured source patch after beforeClassName/baseRevision/sourceHash checks. Requires a host approval receipt.",
+    category: "project",
+    destructive: true,
+    parameters: {
+      type: "object",
+      properties: { proposalId: { type: "string" } }
+    }
+  },
+  {
+    name: "reject_source_patch",
+    description: "Drop the pending structured source patch. Leaves the repo unchanged.",
+    category: "project",
+    parameters: { type: "object", properties: {} }
   }
 ];
 

@@ -1,6 +1,6 @@
 # What ships
 
-This is the product spec for the tree as loaded by DeepSeek Harness **0.1.2-rc.1**. Historical notes in `docs/01`–`docs/07` are not this spec.
+This is the product spec for the tree as loaded by DeepSeek Harness **0.1.2-rc.1**. Historical notes in `docs/01`–`docs/07` are not this spec. Original OD-01…OD-18 IDs stay frozen in `docs/review-2026-09-07/`. This round’s findings are PR3-01…PR3-14 in `docs/review-pr3/BACKLOG_PR3.json`.
 
 ## Required host
 
@@ -22,11 +22,11 @@ Install with a clean `$DSH_HOME` and `dsh plugin --profile web add`. Do not vend
 | Domain service | `src/server/index.ts` `OpenDesignerService` |
 | Tool catalog | `src/server/mcpTools.ts` |
 | Host adapter | `src/server/dshAdapter.ts` (`defineTool`, JSON Schema `output.schema`) |
-| Path jail | `src/server/pathJail.ts` (realpath, then jail) |
-| Destructive approval | `src/server/approval.ts` (host/UI channel only) |
-| Checkpoints / Rewind | `src/server/checkpoints.ts` (deep-copied snapshots) |
-| Working-copy autosave | `.designer/canvas.json` via `atomicWrite.ts` |
-| Agent batch worktrees | `src/server/agentBatch.ts` |
+| Path jail | `src/server/pathJail.ts` (lstat each component; deny symlink/junction; no realpath-then-jail) |
+| Destructive approval | one-shot receipt in `src/server/approvalReceipt.ts`; DSH `tools/pre-execute` asks the host channel |
+| Checkpoints / Rewind | `src/server/checkpoints.ts` (deep-copied snapshots plus source overlay) |
+| Working-copy autosave | `.designer/canvas.json` via `atomicWrite.ts`; dirty clears only on matching `localEditId`/`ackRevision` |
+| Agent batch worktrees | `src/server/agentBatch.ts` (three-way byte compare; durable apply journal) |
 | Client library | `src/client/*`, bundled to `lib/client.js` |
 | Live preview | `preview.html` + `src/client/previewApp.ts` + `scripts/preview-server.mjs` |
 
@@ -39,27 +39,48 @@ There are two buttons. They are not aliases.
 | UI | Tool | Writes |
 |---|---|---|
 | **保存设计稿** | `opendesigner_apply_to_project` | `.designer/canvas.json` and `.designer/applied.json`. The design draft. Not project source. |
-| **应用到工程** | `opendesigner_batch_apply` | Real file diffs from an open Agent batch. Shown first via `opendesigner_batch_preview`. Disabled when there are no diffs. |
+| **应用到工程** | `opendesigner_batch_apply` | Real file diffs from an open Agent batch, through a durable journal. Shown first via `opendesigner_batch_preview`. Disabled when there are no diffs. |
 
-应用到工程 refuses the whole batch when a main-tree file diverged from `baseRef` (`BATCH_CONFLICT`). It includes committed worktree changes, treats rename as delete+write, parses Git paths with `-z`, and rolls back earlier files if a later copy fails.
+应用到工程 refuses the whole batch when a main-tree file diverged from `baseRef` (`BATCH_CONFLICT`). User deletion vs Agent modify of a file that existed at `baseRef` is a conflict: the deletion stays, the candidate stays in the batch. Binary files compare raw bytes. Create batch fails with `DIRTY_WORKTREE` when the project has uncommitted files outside `.designer`.
 
-Create batch fails with `DIRTY_WORKTREE` when the project has uncommitted files outside `.designer`.
+A leftover `applying` journal is replayed on load. If restore fails, the runtime surfaces `BATCH_RECOVERY_BLOCKED` instead of pretending the tree is clean.
 
-## Accept / reject
+## Accept / reject (source ChangeSet)
 
-Local ops (fill, radius, padding, text color, shadow, drag) write the live className and push a checkpoint. **Rewind** undoes them.
+Local ops (fill, radius, padding, text color, shadow, drag) write the live className and push a checkpoint. **Rewind** undoes them, including source overlays.
 
-The model path is a ChangeSet:
+The model path is a structured source patch bound to a real file:
 
-1. Select a node.
-2. Type intent in zh or en.
-3. **提出修改** asks the live model for a scoped className proposal. It does not mutate the store.
-4. **接受** applies the proposal and checkpoints. Rewind undoes it.
-5. **拒绝** drops the proposal. The store is unchanged.
+1. Open a real React page (default `examples/programmer-page`). The canvas imports `src/App.tsx` nodes with `sourceLocation`.
+2. Select a region that maps to a source node.
+3. Type intent in zh or en (for example `把按钮改成翠绿`).
+4. **提出修改** builds a patch of that file (`sourceHash` + `baseRevision` + `beforeClassName`). It does not write. Unsupported edits error. A model that returns a `<button>` wrapper is not accepted; the deterministic mapper is used when the intent is known.
+5. The preview shows the same unified diff that accept will apply.
+6. **拒绝** drops the pending proposal. The repo is unchanged.
+7. **接受** reapplies that same patch after the three freshness checks. It writes the real source file, checkpoints, and updates the canvas from the file. A stale proposal (`STALE_PROPOSAL`) leaves the file untouched.
+8. Quit/reopen, then **Rewind**: the previous checkpoint restores canvas and the source file bytes.
 
-If no live provider is configured, **提出修改** stays disabled. There is no hardcoded `Add shadow-lg to the button className` demo. Shadow is a local inspector chip.
+There is no fake-accept that only toggles a wrapper className. If the selection has no source map, propose fails with `NO_SOURCE_NODE`.
 
-`approve: true` in model tool arguments is ignored. Preview `/api/tool` is the trusted host channel.
+## Host approval receipts (PR3-08)
+
+`approve: true` in tool arguments is ignored. Destructive tools consume a one-shot receipt bound to `projectId`, `storeVersion`, tool name, and a diff hash, with TTL. Reuse after consume is `DENIED`.
+
+| Host | How a receipt is issued |
+|---|---|
+| Preview | `POST /api/approval` (Origin/Host/Content-Type checked), then `POST /api/tool` with `approvalReceipt`. Raw `/api/tool` with `approve:true` and no receipt is `DENIED`. |
+| DSH | `tools/pre-execute` returns `ask` for gated `opendesigner_*` tools. After the host `allowed-once`, the plugin mints a receipt and `executeTool` consumes it. Missing `ctx.on` does not auto-approve. |
+| Operator | `autoApprove` still skips the receipt check. It does not widen the jail. |
+
+## CSS in the iframe (PR3-04)
+
+The canvas stays an isolated `srcdoc` iframe (`sandbox="allow-same-origin"`, scripts denied). Trusted project CSS/tokens are copied into the srcdoc so `getComputedStyle` for background, radius, and shadow matches the parent document. `styleSheets` in the iframe is not empty. Isolation is not removed.
+
+HTML/JSX serialization (`html-render`, `jsx-svg`) always reports `visualProof: false` unless a real browser screenshot is attached (PR3-09).
+
+## Authoritative runtime (PR3-07)
+
+One server runtime owns `projectId` and `storeVersion`. Hydrate requires both `projectId` and an exact `baseVersion`. The server alone increments the version. A status poll cannot make a stale canvas body ride a newer version: the client sends `baseVersion: lastSeenVersion` from the last hydrate/tool ack, not from `/api/status`.
 
 ## How to open a real project
 
@@ -68,29 +89,37 @@ npm install
 npm run build
 npm test
 npm run test:review
+npm run test:review:pr3
 OPENDESIGNER_PROJECT_ROOT=/absolute/path/to/your/react-app npm run preview
 ```
 
-Default preview project is `examples/programmer-page`, a real React + Tailwind `App.tsx`. Do not point preview at `test-fixtures`. The UI and Agent share one `projectId` and `storeVersion`. A stale whole-canvas POST is rejected (`STALE_HYDRATE`).
-
-Open `http://127.0.0.1:4173/`. The preview server only serves `preview.html`, `preview/`, and `lib/`.
+Default preview project is `examples/programmer-page`, a real React + Tailwind `App.tsx`. Do not point preview at `test-fixtures`. Open `http://127.0.0.1:4173/`. The preview server only serves `preview.html`, `preview/`, and `lib/`.
 
 ## Tools
 
-The catalog still has 38 names so existing call sites keep working. Persistence tools are extra host tools with the `opendesigner_` prefix, including `batch_preview`.
+The catalog still has 38 names so existing call sites keep working. Persistence tools are extra host tools with the `opendesigner_` prefix, including `batch_preview`, `propose_source_patch`, `accept_source_patch`, and `reject_source_patch`.
 
 Honest behavior:
 
-- File tools: real I/O, jailed with realpath, destructive tools need a host approval channel or `autoApprove`.
-- Canvas tools: in-memory `FlatStore` with graph validation (missing parents, cycles, dangling page roots).
-- `take_screenshot`: `html-render` is bound to `ComponentSandbox` HTML and may verify a claim. `jsx-svg` never counts as visual proof. `none` fails closed.
+- File tools: real I/O, jailed with lstat-per-component, no symlink/junction follow on read/write/copy/delete. Destructive tools need a host approval receipt (or operator `autoApprove`).
+- Canvas tools: in-memory `FlatStore` with bidirectional parent/child maps, a single parent, and a valid `activePageId`.
+- `take_screenshot`: `html-render` and `jsx-svg` are not visual proof.
 - Claims: overlapping ancestor/descendant locks are conflicts. Releasing an expired claim does not drop a newer live lock.
 - `get_theme`, `search_icons`, `set_icon_library`: stubs.
 
-## Review gate
+## Review gates
+
+Original OD pack (must stay green):
 
 ```sh
 REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-2026-09-07/qa/*.test.mjs
 ```
 
-See `docs/review-2026-09-07/BACKLOG.json` for OD-01…OD-18.
+PR3 re-review pack (C01–C08 plus N01–N03, plus CSS iframe fixture):
+
+```sh
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr3/qa/core-regression.test.mjs
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr3/qa/css-iframe.test.mjs
+```
+
+See `docs/review-pr3/BACKLOG_PR3.json` for PR3-01…PR3-14 and the OD-xx mapping table. Do not renumber OD-xx.

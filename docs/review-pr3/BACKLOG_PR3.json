@@ -1,0 +1,139 @@
+{
+  "date": "2026-09-07",
+  "baseSha": "6e8048313717f4fecbe6b1df3219dc4e2622a812",
+  "mergedPr": 3,
+  "northStar": "A programmer with an existing React+Tailwind page can select a region, state intent (zh/en), see a proposal bound to a real source file, reject with no residue, or accept a structured patch that writes that file, then rewind after quit/reopen.",
+  "gate": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr3/qa/core-regression.test.mjs",
+  "cssFixture": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr3/qa/css-iframe.test.mjs",
+  "idPolicy": "Original OD-01…OD-18 IDs stay frozen in docs/review-2026-09-07/. This round uses PR3-01…PR3-14 only. Do not renumber to fake 18/18 closed.",
+  "mapping": [
+    { "pr3": "PR3-01", "relatedOd": ["OD-05"], "note": "realpath jail missed dangling and parent-dir symlinks" },
+    { "pr3": "PR3-02", "relatedOd": ["OD-01"], "note": "main===null treated as always-safe; user delete vs agent modify" },
+    { "pr3": "PR3-03", "relatedOd": ["OD-01"], "note": "utf8 git show / string compare drops binary conflicts" },
+    { "pr3": "PR3-04", "relatedOd": ["OD-18"], "note": "iframe isolation stripped project CSS/tokens/fonts" },
+    { "pr3": "PR3-05", "relatedOd": ["OD-08", "OD-09"], "note": "propose/accept wrapped a fake button instead of real file diffs" },
+    { "pr3": "PR3-06", "relatedOd": ["OD-09"], "note": "accept did not check beforeClassName / baseRevision / sourceHash" },
+    { "pr3": "PR3-07", "relatedOd": ["OD-07"], "note": "versionless hydrate; client-assigned versions; status refresh riding stale body" },
+    { "pr3": "PR3-08", "relatedOd": ["OD-06"], "note": "host approve:true without a one-shot receipt; no Origin/Host/Content-Type checks" },
+    { "pr3": "PR3-09", "relatedOd": ["OD-13"], "note": "html-render serialization counted as visualProof" },
+    { "pr3": "PR3-10", "relatedOd": ["OD-04"], "note": "before-image/tombstones were memory-only and unbound to workspaceId" },
+    { "pr3": "PR3-11", "relatedOd": ["OD-02"], "note": "apply rollback lived in a catch block; no crash journal" },
+    { "pr3": "PR3-12", "relatedOd": [], "note": "freeze OD-xx; this round is PR3-01…14 plus mapping table" },
+    { "pr3": "PR3-13", "relatedOd": ["OD-12"], "note": "FlatStore parent/child maps not bidirectional; activePage unchecked" },
+    { "pr3": "PR3-14", "relatedOd": ["OD-10"], "note": "autosave cleared dirty without matching localEditId/ackRevision; overlapping saves" }
+  ],
+  "findings": [
+    {
+      "id": "PR3-01",
+      "severity": "P0",
+      "title": "dangling symlink escape",
+      "fixDirection": "Distinguish ENOENT vs dangling symlink vs perms. lstat each path component. Deny symlink/junction on managed read/write/copy/delete paths. Cover existing external, dangling, and parent-dir symlink.",
+      "acceptance": "N01: dangling external symlink must not create a file outside the project (PATH_JAIL). C02 existing external symlink stays rejected. C01 in-project access stays allowed.",
+      "qa": ["C01", "C02", "N01"]
+    },
+    {
+      "id": "PR3-02",
+      "severity": "P0",
+      "title": "user delete vs Agent modify",
+      "fixDirection": "Three-way base/current/candidate. main===null is not always safe. BATCH_CONFLICT; keep the deletion; retain the candidate in the batch.",
+      "acceptance": "N02: concurrent user deletion vs Agent modify returns BATCH_CONFLICT and the file stays deleted.",
+      "qa": ["C04", "N02"]
+    },
+    {
+      "id": "PR3-03",
+      "severity": "P0",
+      "title": "binary conflict via bytes",
+      "fixDirection": "Compare Buffer or content hash. Git blob read keeps raw bytes. Read failure is not absent.",
+      "acceptance": "N03: base 80 00 / user 81 00 / agent 82 00 → BATCH_CONFLICT; user bytes preserved.",
+      "qa": ["N03"]
+    },
+    {
+      "id": "PR3-04",
+      "severity": "P1",
+      "title": "iframe isolation must carry trusted CSS",
+      "fixDirection": "Keep iframe isolation. Inject trusted project CSS/tokens/fonts into srcdoc. Accept with getComputedStyle plus screenshot.",
+      "acceptance": "iframe getComputedStyle matches parent for background, radius, and shadow. styleSheets in the iframe is not empty.",
+      "qa": ["css-iframe"]
+    },
+    {
+      "id": "PR3-05",
+      "severity": "P1",
+      "title": "propose→accept must bind real source diffs",
+      "fixDirection": "Selection → source node map → structured patch bound to file+baseline → preview the same patch → accept applies the same patch. Unsupported edits error. Never fake-accept a button wrapper.",
+      "acceptance": "On examples/programmer-page, accept writes App.tsx. Reject leaves the repo unchanged.",
+      "qa": ["source-patch"]
+    },
+    {
+      "id": "PR3-06",
+      "severity": "P1",
+      "title": "stale proposal must refuse",
+      "fixDirection": "Accept checks beforeClassName, baseRevision, and sourceHash. Mismatch refuses.",
+      "acceptance": "Changing the file or className after propose makes accept fail and leaves the file untouched.",
+      "qa": ["source-patch-stale"]
+    },
+    {
+      "id": "PR3-07",
+      "severity": "P0",
+      "title": "one authoritative project runtime",
+      "fixDirection": "Required projectId and baseVersion exact match. Server alone assigns new versions. No versionless hydrate. Status refresh cannot let a stale body ride a new version.",
+      "acceptance": "Missing projectId or inexact baseVersion is rejected. Client-supplied version is ignored.",
+      "qa": ["npm-test-runtime"]
+    },
+    {
+      "id": "PR3-08",
+      "severity": "P0",
+      "title": "host approval is a one-shot receipt",
+      "fixDirection": "Receipt bound to project/revision/diff hash with TTL+consume. Raw /api/tool with approve:true and no receipt is DENIED. Origin/Host/Content-Type checks. Wire the DSH host approval channel. Do not paper over with autoApprove.",
+      "acceptance": "Host approve:true without a receipt is denied. A consumed receipt cannot be reused.",
+      "qa": ["npm-test-approval-receipt"]
+    },
+    {
+      "id": "PR3-09",
+      "severity": "P1",
+      "title": "HTML/JSX serialization is not visual proof",
+      "fixDirection": "html-render and jsx-svg always visualProof=false unless a real browser screenshot is attached.",
+      "acceptance": "take_screenshot html-render returns visualProof false and does not unlock a mutated claim.",
+      "qa": ["npm-test-screenshot"]
+    },
+    {
+      "id": "PR3-10",
+      "severity": "P0",
+      "title": "persist before-image/tombstones",
+      "fixDirection": "Write before-images and tombstones before authorized writes. Bind workspaceId. Survive restart across batches.",
+      "acceptance": "A new service on the same projectRoot can rewind a write that happened before process exit.",
+      "qa": ["npm-test-source-undo-restart"]
+    },
+    {
+      "id": "PR3-11",
+      "severity": "P1",
+      "title": "durable apply transaction log",
+      "fixDirection": "Journal planned writes and backups on disk. Crash/SIGKILL recovery or an explicit blocked-recovery state. Memory-only catch rollback is not enough.",
+      "acceptance": "Replaying a leftover applying journal restores earlier files.",
+      "qa": ["npm-test-apply-journal"]
+    },
+    {
+      "id": "PR3-12",
+      "severity": "P1",
+      "title": "freeze original OD-xx IDs",
+      "fixDirection": "Keep docs/review-2026-09-07 OD-01…OD-18. This round is PR3-01…14. Mapping table only. Never renumber to fake 18/18 closed.",
+      "acceptance": "BACKLOG_PR3.json contains mapping[] and findings PR3-01…PR3-14. Original BACKLOG.json is unchanged.",
+      "qa": ["docs"]
+    },
+    {
+      "id": "PR3-13",
+      "severity": "P1",
+      "title": "FlatStore bidirectional parent/child",
+      "fixDirection": "childrenByParent and parentByChild stay inverses. Single parent. activePageId must name a page that exists.",
+      "acceptance": "Hydrating a child with two parents fails. setActivePage of a missing page fails.",
+      "qa": ["npm-test-flatstore"]
+    },
+    {
+      "id": "PR3-14",
+      "severity": "P1",
+      "title": "autosave ack must match the local edit",
+      "fixDirection": "Clear dirty only when localEditId and ackRevision match. Serialize saves.",
+      "acceptance": "A stale autosave ack leaves dirty true. Overlapping saves do not drop a newer edit.",
+      "qa": ["npm-test-autosave-ack"]
+    }
+  ]
+}

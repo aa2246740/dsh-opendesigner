@@ -5,7 +5,7 @@ export class ApprovalRequiredError extends Error {
 
   constructor(toolName: string) {
     super(
-      `Destructive tool ${toolName} requires a trusted host/UI confirmation. Model-supplied approve:true is ignored. autoApprove skips the prompt only; it does not expand the project-root jail.`
+      `Destructive tool ${toolName} requires a one-shot host approval receipt bound to project, revision, and diff hash. Model-supplied approve:true is ignored. autoApprove is an operator setting only; it does not expand the project-root jail.`
     );
     this.name = "ApprovalRequiredError";
   }
@@ -23,7 +23,10 @@ export const PERSIST_APPROVAL: Record<string, ApprovalMode> = {
   batch_create: "auto",
   batch_discard: "auto",
   batch_preview: "auto",
-  batch_apply: "gated"
+  batch_apply: "gated",
+  propose_source_patch: "auto",
+  reject_source_patch: "auto",
+  accept_source_patch: "gated"
 };
 
 export function catalogApprovalMode(tool: MCPToolDefinition): ApprovalMode {
@@ -36,13 +39,13 @@ export function persistApprovalMode(toolName: string): ApprovalMode {
 
 export function isApproved(
   mode: ApprovalMode,
-  ctx: Pick<MCPContext, "autoApprove">,
-  args: Record<string, unknown>,
-  channel: ApprovalChannel = "model"
+  ctx: Pick<MCPContext, "autoApprove" | "approvalGranted">,
+  _args: Record<string, unknown>,
+  _channel: ApprovalChannel = "model"
 ): boolean {
   if (mode === "auto") return true;
   if (ctx.autoApprove === true) return true;
-  if (channel === "host" && args.approve === true) return true;
+  if (ctx.approvalGranted === true) return true;
   return false;
 }
 

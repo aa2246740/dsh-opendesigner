@@ -140,9 +140,14 @@ describe("Persistence - checkpoints, autosave, apply", () => {
     const gated = new OpenDesignerService({ projectRoot: dir, autoApprove: false });
     const denied = await gated.executeTool("apply_to_project");
     assert.equal(denied.success, false);
-    assert.equal(denied.code, "APPROVAL_REQUIRED");
+    assert.equal(denied.code, "DENIED");
 
-    const approved = await gated.executeTool("apply_to_project", { approve: true }, { approvalChannel: "host" });
+    const issued = await gated.issueHostReceipt("apply_to_project", {});
+    const approved = await gated.executeTool(
+      "apply_to_project",
+      { approvalReceipt: (issued as { approvalReceipt: string }).approvalReceipt },
+      { approvalChannel: "host" }
+    );
     assert.equal(approved.success, true);
     assert.equal(approved.gitCommit, false);
     const stamp = JSON.parse(await fs.readFile(path.join(dir, ".designer/applied.json"), "utf-8"));
@@ -201,10 +206,14 @@ describe("Persistence - agent batch worktrees", () => {
     const worktreeAbs = path.join(gitDir, created.worktreeRelPath as string);
     assert.equal(worktreeAbs.startsWith(path.join(gitDir, ".designer/worktrees")), true);
 
-    const write = await service.executeTool("project_write", {
+    const writeArgs = {
       path: "src/agent-batch-demo.txt",
-      content: "from-worktree\n",
-      approve: true
+      content: "from-worktree\n"
+    };
+    const writeReceipt = await service.issueHostReceipt("project_write", writeArgs);
+    const write = await service.executeTool("project_write", {
+      ...writeArgs,
+      approvalReceipt: (writeReceipt as { approvalReceipt: string }).approvalReceipt
     }, { approvalChannel: "host" });
     assert.equal(write.success, true);
     const inWorktree = await fs.readFile(path.join(worktreeAbs, "src/agent-batch-demo.txt"), "utf-8");
@@ -217,7 +226,7 @@ describe("Persistence - agent batch worktrees", () => {
 
     const gatedApply = await service.executeTool("batch_apply", { batchId });
     assert.equal(gatedApply.success, false);
-    assert.equal(gatedApply.code, "APPROVAL_REQUIRED");
+    assert.equal(gatedApply.code, "DENIED");
 
     const discarded = await service.executeTool("batch_discard", { batchId });
     assert.equal(discarded.success, true);
@@ -232,14 +241,23 @@ describe("Persistence - agent batch worktrees", () => {
     const created2 = await service.executeTool("batch_create", { label: "apply-demo" });
     assert.equal(created2.success, true);
     const batchId2 = created2.batchId as string;
-    const write2 = await service.executeTool("project_write", {
+    const write2Args = {
       path: "src/agent-batch-demo.txt",
-      content: "applied\n",
-      approve: true
+      content: "applied\n"
+    };
+    const write2Receipt = await service.issueHostReceipt("project_write", write2Args);
+    const write2 = await service.executeTool("project_write", {
+      ...write2Args,
+      approvalReceipt: (write2Receipt as { approvalReceipt: string }).approvalReceipt
     }, { approvalChannel: "host" });
     assert.equal(write2.success, true);
 
-    const applied = await service.executeTool("batch_apply", { batchId: batchId2, approve: true }, { approvalChannel: "host" });
+    const applyArgs = { batchId: batchId2 };
+    const applyReceipt = await service.issueHostReceipt("batch_apply", applyArgs);
+    const applied = await service.executeTool("batch_apply", {
+      ...applyArgs,
+      approvalReceipt: (applyReceipt as { approvalReceipt: string }).approvalReceipt
+    }, { approvalChannel: "host" });
     assert.equal(applied.success, true);
     assert.ok(applied.copied.includes("src/agent-batch-demo.txt"));
     const mainCopy = await fs.readFile(path.join(gitDir, "src/agent-batch-demo.txt"), "utf-8");
@@ -331,5 +349,29 @@ describe("Persistence - project runtime (OD-07)", () => {
     };
     assert.throws(() => service.hydrateStore(stale));
     assert.equal(service.store.getElement("hero")?.props.className, "agent");
+
+    const versionless = {
+      ...service.store.toJSON(),
+      projectId: service.projectId
+    };
+    assert.throws(() => service.hydrateStore(versionless));
+
+    const exact = {
+      ...service.store.toJSON(),
+      projectId: service.projectId,
+      baseVersion: service.storeVersion,
+      byId: {
+        hero: {
+          id: "hero",
+          type: "element",
+          tag: "div",
+          props: { className: "from-client" }
+        }
+      }
+    };
+    const before = service.storeVersion;
+    service.hydrateStore(exact);
+    assert.equal(service.storeVersion, before + 1);
+    assert.equal(service.store.getElement("hero")?.props.className, "from-client");
   });
 });

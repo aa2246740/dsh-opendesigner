@@ -7,12 +7,30 @@ import { dispatchMCPTool, OPEN_DESIGNER_TOOLS } from "./mcpTools.ts";
 import type { MCPContext, ScreenshotMode } from "./mcpTools.ts";
 import { AIGateway, liveProvidersStatus, type AIGatewayConfig, type AIProvider } from "./aiGateway.ts";
 import { REQUIRED_DSH_RELEASE } from "./dshAdapter.ts";
-import { ApprovalRequiredError, assertPersistApproval, type ApprovalChannel } from "./approval.ts";
+import { ApprovalRequiredError, catalogApprovalMode, persistApprovalMode, type ApprovalChannel } from "./approval.ts";
+import { ApprovalDeniedError, ApprovalLedger, hashDiffPayload } from "./approvalReceipt.ts";
 import { PathJailError, resolveProjectPath } from "./pathJail.ts";
-import { atomicWriteFile, atomicWriteJson } from "./atomicWrite.ts";
+import { atomicWriteJson } from "./atomicWrite.ts";
 import { CheckpointLog, type CheckpointKind, type SourceOverlay } from "./checkpoints.ts";
 import { AgentBatchRegistry, BatchError, GitRequiredError, type BatchApplyResult } from "./agentBatch.ts";
+import { ApplyJournalBlockedError } from "./applyJournal.ts";
+import { SourceBaselineStore } from "./sourceBaseline.ts";
 import { git } from "./gitExec.ts";
+import { writeFileNoFollow, readTextNoFollow } from "./fileBytes.ts";
+import { importJsxToElements } from "../compiler/jsxImport.ts";
+import {
+  SourcePatchError,
+  type SourcePatchProposal,
+  applyBoundEdits,
+  classNamePatch,
+  extractClassName,
+  hashSource,
+  intentToClassTokens,
+  looksLikeFakeButtonWrapper,
+  sliceEdits,
+  unifiedDiff
+} from "../compiler/sourcePatch.ts";
+import { mergeTailwindTokens } from "../compiler/tailwindMerge.ts";
 import {
   CANVAS_MUTATION_TOOLS,
   PERSISTENCE_TOOL_NAMES,
@@ -69,8 +87,11 @@ export class OpenDesignerService {
   public aiGateway: AIGateway;
   public checkpoints: CheckpointLog;
   public batches: AgentBatchRegistry;
+  public approvals: ApprovalLedger;
   public sessionTouched = new Set<string>();
-  private sourceBaseline = new Map<string, string | null>();
+  private sourceBaselines: SourceBaselineStore;
+  private pendingProposal: SourcePatchProposal | null = null;
+  private saveChain: Promise<unknown> = Promise.resolve();
 
   private canvasFilePath: string;
   private designerDir: string;
@@ -97,7 +118,13 @@ export class OpenDesignerService {
     this.checkpoints = new CheckpointLog(path.join(this.designerDir, "checkpoints.json"));
     this.batches = new AgentBatchRegistry(
       this.projectRoot,
-      path.join(this.designerDir, "batches.json")
+      path.join(this.designerDir, "batches.json"),
+      this.projectId
+    );
+    this.approvals = new ApprovalLedger(path.join(this.designerDir, "approvals.json"));
+    this.sourceBaselines = new SourceBaselineStore(
+      path.join(this.designerDir, "source-baselines.json"),
+      this.projectId
     );
   }
 
@@ -120,6 +147,11 @@ export class OpenDesignerService {
     await this.loadCanvas();
     await this.checkpoints.load();
     await this.batches.load();
+    await this.approvals.load();
+    await this.sourceBaselines.load();
+    for (const rel of Object.keys(this.sourceBaselines.files)) {
+      this.sessionTouched.add(rel);
+    }
     try {
       const applied = JSON.parse(await fs.readFile(this.appliedFilePath, "utf-8")) as {
         appliedAt?: string;
@@ -127,6 +159,9 @@ export class OpenDesignerService {
       this.lastAppliedAt = applied.appliedAt ?? null;
     } catch {
       this.lastAppliedAt = null;
+    }
+    if (this.store.getRootIds().length === 0) {
+      await this.importProjectSource();
     }
     if (this.checkpoints.entries.length === 0) {
       await this.pushCheckpoint({ label: "baseline", kind: "canvas" });
@@ -188,24 +223,20 @@ export class OpenDesignerService {
 
   public hydrateStore(data: unknown): void {
     const payload = (data ?? {}) as FlatStoreJson & { baseVersion?: number };
-    if (payload.projectId && payload.projectId !== this.projectId) {
+    if (typeof payload.projectId !== "string" || payload.projectId.length === 0) {
+      throw new ProjectMismatchError("projectId is required");
+    }
+    if (payload.projectId !== this.projectId) {
       throw new ProjectMismatchError();
     }
-    const incomingBase =
-      typeof payload.baseVersion === "number"
-        ? payload.baseVersion
-        : typeof payload.version === "number"
-          ? payload.version
-          : undefined;
-    if (incomingBase !== undefined && incomingBase < this.storeVersion) {
+    if (typeof payload.baseVersion !== "number") {
+      throw new StaleHydrateError("baseVersion is required and must exactly match the runtime version");
+    }
+    if (payload.baseVersion !== this.storeVersion) {
       throw new StaleHydrateError();
     }
     this.store.fromJSON(payload);
-    if (typeof payload.version === "number" && payload.version >= this.storeVersion) {
-      this.storeVersion = payload.version;
-    } else {
-      this.storeVersion += 1;
-    }
+    this.storeVersion += 1;
   }
 
   public canvasPayload(): FlatStoreJson & { projectId: string; version: number; savedAt?: string } {
@@ -221,7 +252,18 @@ export class OpenDesignerService {
     this.storeVersion += 1;
   }
 
-  public async saveCanvas(): Promise<void> {
+  public async saveCanvas(localEditId?: number): Promise<{ savedAt: string; ackRevision: number; localEditId?: number }> {
+    const run = this.saveChain.then(() => this.writeCanvas(localEditId));
+    this.saveChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async writeCanvas(
+    localEditId?: number
+  ): Promise<{ savedAt: string; ackRevision: number; localEditId?: number }> {
     const savedAt = new Date().toISOString();
     await atomicWriteJson(this.canvasFilePath, {
       ...this.store.toJSON(),
@@ -230,6 +272,7 @@ export class OpenDesignerService {
       savedAt
     });
     this.lastAutosaveAt = savedAt;
+    return { savedAt, ackRevision: this.storeVersion, localEditId };
   }
 
   public async captureSourceFiles(): Promise<SourceOverlay> {
@@ -238,7 +281,7 @@ export class OpenDesignerService {
     for (const rel of this.sessionTouched) {
       try {
         const abs = resolveProjectPath(root, rel);
-        files[rel] = await fs.readFile(abs, "utf-8");
+        files[rel] = await readTextNoFollow(abs);
       } catch {
         files[rel] = null;
       }
@@ -250,18 +293,18 @@ export class OpenDesignerService {
     const root = this.fileIoRoot();
     const rels = new Set<string>([
       ...this.sessionTouched,
-      ...this.sourceBaseline.keys(),
+      ...Object.keys(this.sourceBaselines.files),
       ...Object.keys(files ?? {})
     ]);
     for (const rel of rels) {
       const hasSnap = Boolean(files && Object.prototype.hasOwnProperty.call(files, rel));
-      const content = hasSnap ? files![rel] : (this.sourceBaseline.get(rel) ?? null);
+      const content = hasSnap ? files![rel] : (this.sourceBaselines.files[rel] ?? null);
       const abs = resolveProjectPath(root, rel);
       if (content === null || content === undefined) {
         await fs.rm(abs, { force: true });
       } else {
         await fs.mkdir(path.dirname(abs), { recursive: true });
-        await atomicWriteFile(abs, content);
+        await writeFileNoFollow(abs, content);
       }
     }
   }
@@ -278,14 +321,15 @@ export class OpenDesignerService {
     const root = this.fileIoRoot();
     for (const rel of rels) {
       this.sessionTouched.add(rel);
-      if (this.sourceBaseline.has(rel)) continue;
+      if (Object.prototype.hasOwnProperty.call(this.sourceBaselines.files, rel)) continue;
       try {
         const abs = resolveProjectPath(root, rel);
-        this.sourceBaseline.set(rel, await fs.readFile(abs, "utf-8"));
+        this.sourceBaselines.remember(rel, await readTextNoFollow(abs));
       } catch {
-        this.sourceBaseline.set(rel, null);
+        this.sourceBaselines.remember(rel, null);
       }
     }
+    await this.sourceBaselines.persist();
   }
 
   public async pushCheckpoint(input: { label: string; kind?: CheckpointKind }): Promise<unknown> {
@@ -408,15 +452,16 @@ export class OpenDesignerService {
     args: Record<string, any> = {},
     options: ExecuteToolOptions = {}
   ): Promise<any> {
-    await this.init();
-    const persistCtx = {
-      autoApprove: this.autoApprove,
-      approvalChannel: options.approvalChannel ?? "model"
-    };
-
     try {
+      await this.init();
+      const persistCtx = {
+        autoApprove: this.autoApprove,
+        approvalChannel: options.approvalChannel ?? "model"
+      };
+
+      await this.assertReceipt(toolName, args, persistCtx);
+
       if (PERSISTENCE_TOOL_NAMES.has(toolName)) {
-        assertPersistApproval(toolName, persistCtx, args);
         return await this.executePersistTool(toolName, args);
       }
 
@@ -429,9 +474,12 @@ export class OpenDesignerService {
         store: this.store,
         claims: this.claimRegistry,
         autoApprove: this.autoApprove,
+        approvalGranted: true,
         approvalChannel: options.approvalChannel ?? "model",
         screenshotMode: this.screenshotMode,
-        saveCanvas: () => this.saveCanvas()
+        saveCanvas: async () => {
+          await this.saveCanvas();
+        }
       };
 
       const result = await dispatchMCPTool(toolName, args, context);
@@ -447,11 +495,14 @@ export class OpenDesignerService {
       if (
         err instanceof PathJailError ||
         err instanceof ApprovalRequiredError ||
+        err instanceof ApprovalDeniedError ||
         err instanceof GitRequiredError ||
         err instanceof BatchError ||
         err instanceof GraphError ||
         err instanceof StaleHydrateError ||
-        err instanceof ProjectMismatchError
+        err instanceof ProjectMismatchError ||
+        err instanceof SourcePatchError ||
+        err instanceof ApplyJournalBlockedError
       ) {
         return { success: false, error: err.message, code: err.code };
       }
@@ -466,6 +517,229 @@ export class OpenDesignerService {
       }
       throw err;
     }
+  }
+
+  public async issueHostReceipt(tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    await this.init();
+    const diffHash = await this.toolDiffHash(tool, args);
+    const receipt = await this.approvals.issue({
+      projectId: this.projectId,
+      revision: this.storeVersion,
+      diffHash,
+      tool
+    });
+    return {
+      success: true,
+      approvalReceipt: receipt.id,
+      projectId: receipt.projectId,
+      revision: receipt.revision,
+      diffHash: receipt.diffHash,
+      tool: receipt.tool,
+      expiresAt: receipt.expiresAt
+    };
+  }
+
+  public async proposeSourcePatch(input: {
+    elementId: string;
+    instruction: string;
+    live?: boolean;
+  }): Promise<unknown> {
+    await this.init();
+    const element = this.store.getElement(input.elementId);
+    if (!element?.sourceLocation) {
+      throw new SourcePatchError("Selection is not mapped to a source node. Unsupported edits cannot fake-accept.", "NO_SOURCE_NODE");
+    }
+    const instruction = input.instruction.trim();
+    if (!instruction) {
+      throw new SourcePatchError("Write an intent in zh or en before proposing.", "EMPTY_INTENT");
+    }
+    const filePath = element.sourceLocation.filePath;
+    const abs = resolveProjectPath(this.projectRoot, filePath);
+    const sourceCode = await readTextNoFollow(abs);
+    const sourceHash = hashSource(sourceCode);
+    const beforeClassName = typeof element.props.className === "string" ? element.props.className : "";
+    const loc = element.sourceLocation;
+
+    let mergedCode: string | null = null;
+    let liveError: string | undefined;
+    if (input.live !== false && this.aiGateway.mockMode !== true && this.aiGateway.status().hasApiKey) {
+      const result = await this.aiGateway.generateAndApply({
+        sourceCode,
+        instruction: `Apply this visual intent to the JSX node at ${filePath}:${loc.line}:${loc.column}. Return surgical edits of this real file, not a wrapped snippet.\nIntent: ${instruction}`
+      });
+      if (result.success && result.mergedCode && result.fallback !== true) {
+        if (looksLikeFakeButtonWrapper(sourceCode, result.mergedCode)) {
+          liveError = "Model returned a button wrapper instead of a real file patch.";
+        } else {
+          mergedCode = result.mergedCode;
+        }
+      } else {
+        liveError = result.liveError || result.error;
+      }
+    }
+
+    if (!mergedCode) {
+      const tokens = intentToClassTokens(instruction);
+      if (!tokens) {
+        throw new SourcePatchError(liveError || "Unsupported edit. Cannot map intent onto a source patch.", "UNSUPPORTED_EDIT");
+      }
+      const nextClass = mergeTailwindTokens(beforeClassName, tokens);
+      const patched = classNamePatch({
+        sourceCode,
+        line: loc.line,
+        column: loc.column,
+        newClassName: nextClass
+      });
+      if (!patched.ok) {
+        throw new SourcePatchError(patched.reason, "UNSUPPORTED_EDIT");
+      }
+      mergedCode = patched.code;
+    }
+
+    const edits = sliceEdits(sourceCode, mergedCode);
+    const applied = applyBoundEdits(sourceCode, edits);
+    if (!applied.ok) {
+      throw new SourcePatchError(applied.reason, "UNSUPPORTED_EDIT");
+    }
+    const afterClassName = extractClassName(applied.code) ?? beforeClassName;
+    const proposal: SourcePatchProposal = {
+      id: `cs_${Date.now()}`,
+      instruction,
+      elementId: input.elementId,
+      filePath,
+      sourceHash,
+      baseRevision: this.storeVersion,
+      beforeClassName,
+      afterClassName,
+      edits,
+      preview: unifiedDiff(filePath, sourceCode, applied.code),
+      mergedCode: applied.code
+    };
+    this.pendingProposal = proposal;
+    return {
+      success: true,
+      proposal,
+      visualProof: false
+    };
+  }
+
+  public async acceptSourcePatch(input: { proposalId?: string } = {}): Promise<unknown> {
+    await this.init();
+    const proposal = this.pendingProposal;
+    if (!proposal) {
+      throw new SourcePatchError("No pending source patch.", "NO_PROPOSAL");
+    }
+    if (input.proposalId && input.proposalId !== proposal.id) {
+      throw new SourcePatchError("Proposal id mismatch.", "STALE_PROPOSAL");
+    }
+    const element = this.store.getElement(proposal.elementId);
+    const currentClass = typeof element?.props.className === "string" ? element.props.className : "";
+    if (currentClass !== proposal.beforeClassName) {
+      throw new SourcePatchError("beforeClassName no longer matches the selected node.", "STALE_PROPOSAL");
+    }
+    if (proposal.baseRevision !== this.storeVersion) {
+      throw new SourcePatchError("baseRevision no longer matches the project runtime.", "STALE_PROPOSAL");
+    }
+    const abs = resolveProjectPath(this.projectRoot, proposal.filePath);
+    const current = await readTextNoFollow(abs);
+    if (hashSource(current) !== proposal.sourceHash) {
+      throw new SourcePatchError("sourceHash no longer matches the file on disk.", "STALE_PROPOSAL");
+    }
+    const applied = applyBoundEdits(current, proposal.edits);
+    if (!applied.ok || applied.code !== proposal.mergedCode) {
+      throw new SourcePatchError(applied.ok ? "Patch preview does not match accept payload." : applied.reason, "UNSUPPORTED_EDIT");
+    }
+    await this.rememberSourceBaselines("project_edit", { path: proposal.filePath });
+    await this.pushCheckpoint({ label: "changeset-before-accept", kind: "session" });
+    await writeFileNoFollow(abs, applied.code);
+    this.sessionTouched.add(proposal.filePath);
+    if (element) {
+      element.props = { ...element.props, className: proposal.afterClassName };
+      this.store.setElement(element);
+    }
+    this.storeVersion += 1;
+    this.pendingProposal = null;
+    await this.pushCheckpoint({ label: "changeset-accept", kind: "session" });
+    await this.saveCanvas();
+    return {
+      success: true,
+      filePath: proposal.filePath,
+      preview: proposal.preview,
+      afterClassName: proposal.afterClassName,
+      projectId: this.projectId,
+      version: this.storeVersion,
+      store: this.store.toJSON()
+    };
+  }
+
+  public async rejectSourcePatch(): Promise<unknown> {
+    this.pendingProposal = null;
+    return { success: true, residue: false };
+  }
+
+  private async importProjectSource(): Promise<void> {
+    const candidates = ["src/App.tsx", "src/app.tsx", "App.tsx", "src/page.tsx"];
+    for (const rel of candidates) {
+      try {
+        const abs = resolveProjectPath(this.projectRoot, rel);
+        const source = await readTextNoFollow(abs);
+        const imported = importJsxToElements(source, rel);
+        if (imported.elements.length === 0) continue;
+        for (const el of imported.elements) this.store.setElement(el);
+        for (const edge of imported.attachments) this.store.attachChild(edge.parentId, edge.childId);
+        const rootId = imported.rootIds[0];
+        if (rootId) {
+          this.store.addPage({ id: "page-source", name: path.basename(rel), isLoaded: true, rootElementId: rootId });
+          this.store.setActivePage("page-source");
+        }
+        return;
+      } catch {
+        // Try the next candidate.
+      }
+    }
+  }
+
+  private async toolDiffHash(tool: string, args: Record<string, unknown>): Promise<string> {
+    if (tool === "batch_apply" && typeof args.batchId === "string") {
+      return await this.batches.diffHash(args.batchId);
+    }
+    if (tool === "accept_source_patch") {
+      const proposal = this.pendingProposal;
+      return hashDiffPayload([tool, proposal?.id || "", proposal?.sourceHash || ""]);
+    }
+    if (tool === "project_write_batch") {
+      return hashDiffPayload([tool, JSON.stringify(args.files || [])]);
+    }
+    return hashDiffPayload([
+      tool,
+      String(args.path || args.batchId || ""),
+      String(args.content || args.old_string || ""),
+      String(args.new_string || "")
+    ]);
+  }
+
+  private async assertReceipt(
+    toolName: string,
+    args: Record<string, unknown>,
+    ctx: { autoApprove?: boolean }
+  ): Promise<void> {
+    const persist = PERSISTENCE_TOOL_NAMES.has(toolName);
+    const catalog = OPEN_DESIGNER_TOOLS.find((tool) => tool.name === toolName);
+    const mode = persist
+      ? persistApprovalMode(toolName)
+      : catalog
+        ? catalogApprovalMode(catalog)
+        : "auto";
+    if (mode === "auto") return;
+    if (ctx.autoApprove === true) return;
+    const diffHash = await this.toolDiffHash(toolName, args);
+    await this.approvals.consume({
+      receiptId: args.approvalReceipt,
+      projectId: this.projectId,
+      revision: this.storeVersion,
+      diffHash,
+      tool: toolName
+    });
   }
 
   private async executePersistTool(toolName: string, args: Record<string, any>): Promise<unknown> {
@@ -483,16 +757,20 @@ export class OpenDesignerService {
           checkpoints: this.checkpoints.list(),
           cursor: this.checkpoints.cursor
         };
-      case "autosave":
-        await this.saveCanvas();
+      case "autosave": {
+        const localEditId = typeof args.localEditId === "number" ? args.localEditId : undefined;
+        const saved = await this.saveCanvas(localEditId);
         return {
           success: true,
           path: ".designer/canvas.json",
-          savedAt: this.lastAutosaveAt,
+          savedAt: saved.savedAt,
           projectId: this.projectId,
           version: this.storeVersion,
+          ackRevision: saved.ackRevision,
+          localEditId: saved.localEditId,
           gitCommit: false
         };
+      }
       case "apply_to_project":
         return await this.applyToProject();
       case "batch_create":
@@ -509,6 +787,18 @@ export class OpenDesignerService {
         };
       case "batch_apply":
         return { success: true, ...(await this.applyOpenBatchFiles(String(args.batchId || ""))) };
+      case "propose_source_patch":
+        return await this.proposeSourcePatch({
+          elementId: String(args.elementId || ""),
+          instruction: String(args.instruction || ""),
+          live: args.live !== false
+        });
+      case "accept_source_patch":
+        return await this.acceptSourcePatch({
+          proposalId: typeof args.proposalId === "string" ? args.proposalId : undefined
+        });
+      case "reject_source_patch":
+        return await this.rejectSourcePatch();
       default:
         throw new Error(`Unknown persistence tool: ${toolName}`);
     }
@@ -535,6 +825,8 @@ export * from "./mcpTools.ts";
 export * from "./aiGateway.ts";
 export * from "./pathJail.ts";
 export * from "./approval.ts";
+export * from "./approvalReceipt.ts";
+export * from "./applyJournal.ts";
 export * from "./checkpoints.ts";
 export * from "./agentBatch.ts";
 export * from "./persistenceTools.ts";

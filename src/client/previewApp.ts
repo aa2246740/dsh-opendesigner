@@ -36,14 +36,37 @@ export interface ChangeSetProposal {
   id: string;
   instruction: string;
   elementId: string;
+  filePath: string;
+  sourceHash: string;
+  baseRevision: number;
   beforeClassName: string;
   afterClassName: string;
+  preview: string;
   mergedCode: string;
 }
 
-export function autosaveClearsDirty(httpOk: boolean, result: { success?: boolean } | undefined): boolean {
-  return httpOk && result?.success !== false;
+export function autosaveClearsDirty(
+  httpOk: boolean,
+  result: { success?: boolean; localEditId?: number; ackRevision?: number } | undefined,
+  expected?: { localEditId?: number; ackRevision?: number }
+): boolean {
+  if (!httpOk || result?.success === false) return false;
+  if (expected?.localEditId !== undefined && result?.localEditId !== expected.localEditId) return false;
+  if (expected?.ackRevision !== undefined && result?.ackRevision !== expected.ackRevision) return false;
+  return true;
 }
+
+const GATED_TOOLS = new Set([
+  "apply_to_project",
+  "batch_apply",
+  "project_write",
+  "project_write_batch",
+  "project_edit",
+  "project_delete",
+  "local_write",
+  "local_edit",
+  "accept_source_patch"
+]);
 
 const CARD_ID = "hero-card";
 const BADGE_ID = "status-badge";
@@ -131,11 +154,6 @@ function listElementIds(store: FlatStore): string[] {
   return Object.keys(store.toJSON().byId);
 }
 
-function extractClassName(code: string): string | null {
-  const match = code.match(/className="([^"]*)"/);
-  return match ? match[1] : null;
-}
-
 function swatchButtons(prefix: string, values: string[], kind: "bg" | "text"): string {
   return values
     .map((value) => {
@@ -155,6 +173,8 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   let proposal: ChangeSetProposal | null = null;
   let hasLiveModel = false;
   let fileDiffCount = 0;
+  let pendingEditId = 0;
+  let saveQueue: Promise<unknown> = Promise.resolve();
 
   function syncGeometry(): void {
     panel.clearRegisteredRects();
@@ -163,10 +183,6 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
         panel.registerElement(id, el.canvasRect, el);
       }
     }
-  }
-
-  function markDirty(): void {
-    dirty = true;
   }
 
   root.innerHTML = `
@@ -259,10 +275,10 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     acceptBtn.disabled = !proposal;
     rejectBtn.disabled = !proposal;
     applyFilesBtn.disabled = !openBatchId || fileDiffCount === 0;
-    proposeBtn.disabled = !hasLiveModel;
+    proposeBtn.disabled = false;
     proposeBtn.title = hasLiveModel
-      ? "Propose a scoped ChangeSet"
-      : "No live model configured. Local style edits still work.";
+      ? "Propose a structured patch of the selected source node"
+      : "Supported zh/en intents map onto a real source patch. Live model is used when configured.";
   }
 
   function updateHud(): void {
@@ -341,7 +357,6 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     const persistence = (status.persistence || {}) as Record<string, unknown>;
     const ai = (status.ai || {}) as Record<string, unknown>;
     projectId = typeof status.projectId === "string" ? status.projectId : projectId;
-    if (typeof status.storeVersion === "number") lastSeenVersion = status.storeVersion;
     hasLiveModel = ai.hasApiKey === true && ai.mockMode !== true;
     statusEl.textContent = `plugin ${status.name} | project ${projectId || "—"} v${lastSeenVersion} | jail ${status.projectRoot} | ai ${ai.provider || "none"}/${ai.model || "none"} hasApiKey=${ai.hasApiKey === true}`;
     autosaveEl.textContent = `working copy ${persistence.lastAutosaveAt || "none"} | checkpoints ${persistence.checkpointCount ?? 0} | current ${persistence.currentCheckpointLabel || "none"} | dirty=${dirty}`;
@@ -360,7 +375,6 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     const payload = {
       ...store.toJSON(),
       projectId,
-      version: lastSeenVersion + 1,
       baseVersion: lastSeenVersion
     };
     try {
@@ -396,12 +410,24 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     return result;
   }
 
+  function markDirty(): void {
+    dirty = true;
+    pendingEditId += 1;
+  }
+
   async function checkpointAndAutosave(label: string): Promise<void> {
     markDirty();
-    const cp = await callTool("checkpoint", { label, kind: "canvas" });
-    if (cp.success === false) return;
-    const auto = await callTool("autosave");
-    if (autosaveClearsDirty(true, auto)) dirty = false;
+    const editId = pendingEditId;
+    const work = async () => {
+      const cp = await callTool("checkpoint", { label, kind: "canvas" });
+      if (cp.success === false) return;
+      const auto = await callTool("autosave", { localEditId: editId });
+      if (autosaveClearsDirty(true, auto, { localEditId: editId, ackRevision: lastSeenVersion })) {
+        dirty = pendingEditId !== editId ? true : false;
+      }
+    };
+    saveQueue = saveQueue.then(work, work);
+    await saveQueue;
   }
 
   function applyStyle(property: keyof ParsedStyles, value: string, label: string): void {
@@ -521,7 +547,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   });
 
   root.querySelector("#od-save-design")!.addEventListener("click", () => {
-    void callTool("apply_to_project", { approve: true });
+    void callTool("apply_to_project");
   });
 
   root.querySelector("#od-apply-files")!.addEventListener("click", async () => {
@@ -532,7 +558,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       });
       return;
     }
-    const result = await callTool("batch_apply", { batchId: openBatchId, approve: true });
+    const result = await callTool("batch_apply", { batchId: openBatchId });
     if (result.success === true) {
       openBatchId = null;
       fileDiffCount = 0;
@@ -556,8 +582,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       return;
     }
     void callTool("project_write_batch", {
-      files: [{ path: BATCH_FILE, content: "agent-batch isolation write\n" }],
-      approve: true
+      files: [{ path: BATCH_FILE, content: "agent-batch isolation write\n" }]
     });
   });
 
@@ -573,74 +598,60 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   });
 
   proposeBtn.addEventListener("click", async () => {
-    if (!hasLiveModel) {
-      aiBannerEl.textContent = "Model path gated: no live provider. Use local style edits.";
-      aiEl.textContent = "提出修改 is disabled until a live model is configured.";
+    const id = selectedId();
+    if (!id) {
+      aiEl.textContent = "Select a region that maps to a source node before proposing.";
       return;
     }
-    if (!api.applyAiMerge) {
-      aiEl.textContent = "AI merge endpoint is not attached.";
-      return;
-    }
-    const id = selectedId() || BTN_ID;
-    if (!selectedId()) panel.select([id]);
     const instruction = intentEl.value.trim();
     if (!instruction) {
       aiEl.textContent = "Write an intent in zh or en before proposing.";
       return;
     }
-    const before = classNameOf(store, id);
-    const source = `<button className="${before}">${store.getElement(id)?.textContent || ""}</button>`;
-    const result = await api.applyAiMerge(source, instruction);
-    const attempts = (result.attemptsLog || [])
-      .map((row) => `${row.label || row.provider} HTTP ${row.httpStatus ?? "err"} ${row.ok ? "ok" : "fail"}`)
-      .join("\n");
-    if (result.success && result.mergedCode && result.fallback !== true && result.mockMode !== true) {
-      const after = extractClassName(result.mergedCode) || before;
-      proposal = {
-        id: `cs_${Date.now()}`,
-        instruction,
-        elementId: id,
-        beforeClassName: before,
-        afterClassName: after,
-        mergedCode: result.mergedCode
-      };
-      aiBannerEl.textContent = `proposal ready provider=${result.provider || "unknown"} model=${result.model || "unknown"}`;
-      aiEl.textContent = `${aiBannerEl.textContent}\nintent: ${instruction}\nbefore: ${before}\nafter: ${after}\n${attempts}\nAccept to apply. Reject to drop.`;
+    const result = await callTool("propose_source_patch", { elementId: id, instruction });
+    if (result.success && result.proposal && typeof result.proposal === "object") {
+      proposal = result.proposal as ChangeSetProposal;
+      aiBannerEl.textContent = `proposal ${proposal.id} file=${proposal.filePath} hash=${proposal.sourceHash.slice(0, 8)}`;
+      aiEl.textContent = `${aiBannerEl.textContent}\nintent: ${instruction}\nbefore: ${proposal.beforeClassName}\nafter: ${proposal.afterClassName}\n${proposal.preview}\nAccept writes this file. Reject leaves the repo unchanged.`;
       syncProposalButtons();
       return;
     }
     proposal = null;
     syncProposalButtons();
-    if (result.success && result.fallback) {
-      aiBannerEl.textContent = "live failed; mock is not applied";
-      aiEl.textContent = `live failed: ${result.liveError || "provider error"}\n${attempts}`;
-      return;
-    }
     aiBannerEl.textContent = "AI propose failed";
-    aiEl.textContent = `${result.error || "AI merge failed"}\n${attempts}`;
+    aiEl.textContent = String(result.error || "propose failed");
   });
 
-  acceptBtn.addEventListener("click", () => {
+  acceptBtn.addEventListener("click", async () => {
     if (!proposal) return;
-    setClassName(store, proposal.elementId, proposal.afterClassName);
     const accepted = proposal;
+    const result = await callTool("accept_source_patch", { proposalId: accepted.id });
+    if (result.success === false) {
+      aiEl.textContent = `Accept refused: ${String(result.error || "stale or unsupported")}`;
+      return;
+    }
+    if (result.store && typeof result.store === "object") {
+      store.fromJSON(result.store as Record<string, unknown>);
+    } else {
+      const el = store.getElement(accepted.elementId);
+      if (el) {
+        el.props = { ...el.props, className: accepted.afterClassName };
+        store.setElement(el);
+      }
+    }
     proposal = null;
     render();
-    void checkpointAndAutosave("changeset-accept");
-    aiEl.textContent = `Accepted ${accepted.id}. Rewind undoes it.`;
+    aiEl.textContent = `Accepted ${accepted.id}. Wrote ${accepted.filePath}. Rewind restores the file.`;
     syncProposalButtons();
   });
 
-  rejectBtn.addEventListener("click", () => {
+  rejectBtn.addEventListener("click", async () => {
     if (!proposal) return;
-    const before = classNameOf(store, proposal.elementId);
-    clearProposal("Rejected. Store unchanged.");
-    if (before !== proposal?.beforeClassName) {
-      // proposal already nulled; residue check uses captured before
-    }
-    void before;
+    await callTool("reject_source_patch");
+    proposal = null;
     aiBannerEl.textContent = "ChangeSet rejected with no residue";
+    aiEl.textContent = "Rejected. Store and repo unchanged.";
+    syncProposalButtons();
     render();
   });
 
@@ -672,17 +683,22 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
 
   window.setInterval(() => {
     if (!dirty) return;
-    void (async () => {
-      const result = await callTool("autosave");
-      if (autosaveClearsDirty(true, result)) dirty = false;
-    })();
+    const editId = pendingEditId;
+    const work = async () => {
+      const result = await callTool("autosave", { localEditId: editId });
+      if (autosaveClearsDirty(true, result, { localEditId: editId, ackRevision: lastSeenVersion })) {
+        dirty = pendingEditId !== editId ? true : false;
+      }
+    };
+    saveQueue = saveQueue.then(work, work);
   }, 8000);
 
   void (async () => {
     if (!api.getStatus) {
       statusEl.textContent = "standalone preview (no DSH host)";
       seedStore(store);
-      panel.select([CARD_ID]);
+      const ids = listElementIds(store);
+      panel.select(ids.slice(0, 1));
       render();
       return;
     }
@@ -701,13 +717,16 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
         seedStore(store);
         await checkpointAndAutosave("seed");
       }
-      panel.select([CARD_ID]);
+      const ids = listElementIds(store);
+      const button = ids.find((id) => store.getElement(id)?.tag === "button") || ids[0];
+      if (button) panel.select([button]);
       await refreshStatus();
       render();
     } catch (err) {
       statusEl.textContent = `status unavailable: ${err instanceof Error ? err.message : String(err)}`;
       seedStore(store);
-      panel.select([CARD_ID]);
+      const ids = listElementIds(store);
+      panel.select(ids.slice(0, 1));
       render();
     }
   })();
@@ -741,10 +760,23 @@ if (typeof window !== "undefined") {
         return body;
       },
       callTool: async (tool, args = {}) => {
+        let payloadArgs = { ...args };
+        if (GATED_TOOLS.has(tool)) {
+          const issued = await fetch("/api/approval", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tool, args: payloadArgs })
+          });
+          const receipt = await issued.json().catch(() => ({ success: false }));
+          if (!issued.ok || receipt.success === false || typeof receipt.approvalReceipt !== "string") {
+            return { success: false, error: receipt.error || "DENIED: no approval receipt", code: "DENIED" };
+          }
+          payloadArgs = { ...payloadArgs, approvalReceipt: receipt.approvalReceipt };
+        }
         const res = await fetch("/api/tool", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tool, args })
+          body: JSON.stringify({ tool, args: payloadArgs })
         });
         if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
         return await res.json();
