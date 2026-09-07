@@ -11,13 +11,14 @@ import { parse } from "@babel/parser";
 import traverse from "@babel/traverse";
 import { mergeTailwindTokens } from "./tailwindMerge.ts";
 
-export { getTailwindCategory, mergeTailwindTokens, mergeTailwindClasses } from "./tailwindMerge.ts";
+export { getTailwindCategory, mergeTailwindTokens, mergeTailwindClasses, dropTailwindCategory } from "./tailwindMerge.ts";
 
 export interface SlicingEditRequest {
   sourceCode: string;
   targetLine: number;
   targetColumn: number;
   newClassName?: string;
+  setClassName?: boolean;
   newStyleProp?: { key: string; value: string | number };
 }
 
@@ -151,7 +152,7 @@ export function updateSourceCodeDeterministically(request: SlicingEditRequest): 
       }
 
       const existingClassStr = classAttr.value.value;
-      const merged = mergeTailwindTokens(existingClassStr, newClassName);
+      const merged = request.setClassName ? newClassName : mergeTailwindTokens(existingClassStr, newClassName);
       const raw = classAttr.value.extra?.raw || `"${existingClassStr}"`;
       const quote = raw[0] === "'" ? "'" : '"';
       const replacement = `${quote}${merged}${quote}`;

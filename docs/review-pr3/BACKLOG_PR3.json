@@ -5,7 +5,7 @@
   "northStar": "A programmer with an existing React+Tailwind page can select a region, state intent (zh/en), see a proposal bound to a real source file, reject with no residue, or accept a structured patch that writes that file, then rewind after quit/reopen.",
   "gate": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr3/qa/core-regression.test.mjs",
   "cssFixture": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr3/qa/css-iframe.test.mjs",
-  "idPolicy": "Original OD-01…OD-18 IDs stay frozen in docs/review-2026-09-07/. This round uses PR3-01…PR3-14 only. Do not renumber to fake 18/18 closed.",
+  "idPolicy": "Original OD-01…OD-18 IDs stay frozen in docs/review-2026-09-07/. PR3-01…PR3-14 IDs stay stable. Mapping is related-not-closed: do not treat a PR3 row as closing an OD item, and do not claim PR3-01…14 all closed. Residual holes from this PR are PR4-F01…PR4-F10 in docs/review-pr4/BACKLOG_PR4.json.",
   "mapping": [
     { "pr3": "PR3-01", "relatedOd": ["OD-05"], "note": "realpath jail missed dangling and parent-dir symlinks" },
     { "pr3": "PR3-02", "relatedOd": ["OD-01"], "note": "main===null treated as always-safe; user delete vs agent modify" },

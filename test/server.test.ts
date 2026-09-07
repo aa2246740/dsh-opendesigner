@@ -130,6 +130,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
   });
 
   after(async () => {
+    if (service) await service.stop().catch(() => undefined);
     await fs.rm(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -203,6 +204,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
 
     const verifiedRelease = await isolated.executeTool("canvas_release", { claim_id: claimId });
     assert.equal(verifiedRelease.success, false);
+    await isolated.stop();
   });
 
   it("should enforce optimistic concurrency with STALE_READ rejection on covering_hash mismatch", async () => {
@@ -299,7 +301,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
   });
 
   it("rejects filesystem escape and default-deny destructive writes", async () => {
-    const jailed = new OpenDesignerService({ projectRoot: TEST_DIR, autoApprove: false });
+    const jailed = new OpenDesignerService({ projectRoot: path.join(TEST_DIR, "jail-extra"), autoApprove: false });
     const abs = await jailed.executeTool("project_read", { path: "/etc/passwd" });
     assert.equal(abs.success, false);
     assert.equal(abs.code, "PATH_JAIL");
@@ -350,7 +352,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     assert.equal(modelApprove.success, false);
     assert.equal(modelApprove.code, "DENIED");
 
-    const auto = new OpenDesignerService({ projectRoot: TEST_DIR, autoApprove: true });
+    const auto = new OpenDesignerService({ projectRoot: path.join(TEST_DIR, "auto-extra"), autoApprove: true });
     const autoWrite = await auto.executeTool("project_write", {
       path: "src/auto.tsx",
       content: "auto"
@@ -367,19 +369,22 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     const missing = await jailed.executeTool("project_read", { path: "src/does-not-exist.tsx" });
     assert.equal(missing.success, false);
     assert.equal(missing.code, "NOT_FOUND");
+    await jailed.stop();
+    await auto.stop();
   });
 
   it("does not mark claims verified from a missing screenshot renderer", async () => {
-    const closed = new OpenDesignerService({ projectRoot: TEST_DIR, screenshotMode: "none" });
+    const closed = new OpenDesignerService({ projectRoot: path.join(TEST_DIR, "noshot"), screenshotMode: "none" });
     const pageRes = await closed.executeTool("canvas_create_page", { name: "NoShot" });
     const shot = await closed.executeTool("take_screenshot", { elementId: pageRes.rootElementId });
     assert.equal(shot.success, false);
     assert.equal(shot.implemented, false);
+    await closed.stop();
   });
 
   it("does not treat jsx-svg as visual proof", async () => {
     const fake = new OpenDesignerService({
-      projectRoot: TEST_DIR,
+      projectRoot: path.join(TEST_DIR, "svg-shot"),
       autoApprove: true,
       screenshotMode: "jsx-svg"
     });
@@ -401,5 +406,6 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     assert.equal(shot.visualProof, false);
     const unverified = await fake.executeTool("canvas_release", { claim_id: claimRes.claimId });
     assert.equal(unverified.success, false);
+    await fake.stop();
   });
 });

@@ -104,6 +104,7 @@ describe("Persistence - checkpoints, autosave, apply", () => {
     const worktreeExists = await fs.stat(worktrees).then(() => true).catch(() => false);
     assert.equal(worktreeExists, false);
     assert.equal(rewindCanvas.worktreeCreated, false);
+    await service.stop();
   });
 
   it("writes working copy atomically and never git-commits", async () => {
@@ -134,6 +135,7 @@ describe("Persistence - checkpoints, autosave, apply", () => {
 
     const autosave = await service.executeTool("autosave");
     assert.equal(autosave.gitCommit, false);
+    await service.stop();
   });
 
   it("gates apply_to_project and still keeps the path jail under autoApprove", async () => {
@@ -153,6 +155,7 @@ describe("Persistence - checkpoints, autosave, apply", () => {
     const stamp = JSON.parse(await fs.readFile(path.join(dir, ".designer/applied.json"), "utf-8"));
     assert.equal(stamp.gitCommit, false);
 
+    await gated.stop();
     const auto = new OpenDesignerService({ projectRoot: dir, autoApprove: true });
     const escaped = await auto.executeTool("project_read", { path: "/etc/passwd" });
     assert.equal(escaped.success, false);
@@ -163,6 +166,7 @@ describe("Persistence - checkpoints, autosave, apply", () => {
     });
     assert.equal(batchJail.success, false);
     assert.equal(batchJail.code, "PATH_JAIL");
+    await auto.stop();
   });
 });
 
@@ -183,6 +187,7 @@ describe("Persistence - agent batch worktrees", () => {
     assert.equal(created.code, "GIT_REQUIRED");
     const stillWorks = await service.executeTool("checkpoint", { label: "nongit-canvas" });
     assert.equal(stillWorks.success, true);
+    await service.stop();
   });
 
   it("does not attach a worktree to a parent git repo", async () => {
@@ -192,6 +197,7 @@ describe("Persistence - agent batch worktrees", () => {
     const created = await service.executeTool("batch_create", { label: "parent-git" });
     assert.equal(created.success, false);
     assert.equal(created.code, "GIT_REQUIRED");
+    await service.stop();
   });
 
   it("creates, discards, and applies a jailed worktree without committing", async () => {
@@ -265,6 +271,7 @@ describe("Persistence - agent batch worktrees", () => {
 
     const { stdout: log } = await git(gitDir, ["log", "--oneline"]);
     assert.equal(log.trim().split("\n").length, 1);
+    await service.stop();
   });
 
   it("rejects batch create when the project is dirty (OD-01/R08)", async () => {
@@ -278,6 +285,7 @@ describe("Persistence - agent batch worktrees", () => {
     const created = await service.executeTool("batch_create", { label: "dirty" });
     assert.equal(created.success, false);
     assert.equal(created.code, "DIRTY_WORKTREE");
+    await service.stop();
   });
 });
 
@@ -312,6 +320,7 @@ describe("Persistence - source undo (OD-04)", () => {
       .catch(() => false);
     assert.equal(createdExists, false);
     assert.equal(await fs.readFile(path.join(dir, "src/keep.tsx"), "utf-8"), "keep-v1\n");
+    await service.stop();
   });
 });
 
@@ -373,5 +382,6 @@ describe("Persistence - project runtime (OD-07)", () => {
     service.hydrateStore(exact);
     assert.equal(service.storeVersion, before + 1);
     assert.equal(service.store.getElement("hero")?.props.className, "from-client");
+    await service.stop();
   });
 });

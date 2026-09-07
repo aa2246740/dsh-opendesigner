@@ -74,7 +74,7 @@ describe("PR3-05/06 source patches", () => {
     });
     assert.equal(staleAccept.success, false);
     assert.equal(staleAccept.code, "STALE_PROPOSAL");
-
+    await service.stop();
     await fs.rm(dir, { recursive: true, force: true });
   });
 });
@@ -91,12 +91,14 @@ describe("PR3-10 source baselines survive restart", () => {
     });
     assert.equal(write.success, true);
 
+    await first.stop();
     const second = new OpenDesignerService({ projectRoot: dir, autoApprove: true });
     await second.init();
     const rewind = await second.executeTool("rewind", { checkpointId: seed.checkpoint.id });
     assert.equal(rewind.success, true);
     const exists = await fs.stat(path.join(dir, "src/keep.tsx")).then(() => true).catch(() => false);
     assert.equal(exists, false);
+    await second.stop();
     await fs.rm(dir, { recursive: true, force: true });
   });
 });
@@ -125,6 +127,7 @@ describe("PR3-05 rewind after accept", () => {
     const rewind = await service.executeTool("rewind");
     assert.equal(rewind.success, true);
     assert.equal(await fs.readFile(path.join(dir, "src/App.tsx"), "utf8"), source);
+    await service.stop();
     await fs.rm(dir, { recursive: true, force: true });
   });
 });

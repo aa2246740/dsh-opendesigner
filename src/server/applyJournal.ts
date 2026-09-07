@@ -1,19 +1,37 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { atomicWriteJson } from "./atomicWrite.ts";
-import { copyFileNoFollow, unlinkNoFollow, writeFileNoFollow } from "./fileBytes.ts";
+import { PathJailError, resolveProjectPath } from "./pathJail.ts";
+import { copyFileNoFollow, unlinkNoFollow, writeFileNoFollow, contentHash, readPresence } from "./fileBytes.ts";
 
 export type ApplyJournalPhase = "prepared" | "applying" | "committed" | "blocked";
+
+export interface ApplyJournalOp {
+  kind: "write" | "delete";
+  rel: string;
+  mode?: number | null;
+  beforeHash?: string | null;
+  afterHash?: string | null;
+}
+
+export interface ApplyJournalBackup {
+  rel: string;
+  backupRel: string | null;
+  beforeHash?: string | null;
+  afterHash?: string | null;
+}
 
 export interface ApplyJournalEntry {
   workspaceId: string;
   batchId: string;
   phase: ApplyJournalPhase;
-  planned: { kind: "write" | "delete"; rel: string }[];
-  backups: { rel: string; backupRel: string | null }[];
+  planned: ApplyJournalOp[];
+  backups: ApplyJournalBackup[];
   error?: string;
   updatedAt: string;
 }
+
+const PHASES = new Set<ApplyJournalPhase>(["prepared", "applying", "committed", "blocked"]);
 
 export class ApplyJournalBlockedError extends Error {
   readonly code = "BATCH_RECOVERY_BLOCKED";
@@ -21,6 +39,10 @@ export class ApplyJournalBlockedError extends Error {
     super(message);
     this.name = "ApplyJournalBlockedError";
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export class ApplyJournal {
@@ -35,13 +57,85 @@ export class ApplyJournal {
   }
 
   public async load(): Promise<ApplyJournalEntry | null> {
+    let rawText: string;
     try {
-      const raw = JSON.parse(await fs.readFile(this.filePath, "utf-8")) as ApplyJournalEntry;
-      if (raw.workspaceId !== this.workspaceId) return null;
-      return raw;
-    } catch {
-      return null;
+      rawText = await fs.readFile(this.filePath, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw new ApplyJournalBlockedError(
+        `Apply journal unreadable (${(err as NodeJS.ErrnoException).code || "error"}). Recovery blocked.`
+      );
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      throw new ApplyJournalBlockedError("Apply journal JSON is corrupt. Recovery blocked.");
+    }
+    return this.parseEntry(parsed);
+  }
+
+  public parseEntry(raw: unknown): ApplyJournalEntry {
+    if (!isRecord(raw)) {
+      throw new ApplyJournalBlockedError("Apply journal schema is invalid. Recovery blocked.");
+    }
+    if (raw.workspaceId !== this.workspaceId) {
+      throw new ApplyJournalBlockedError("Apply journal workspace identity mismatch. Recovery blocked.");
+    }
+    if (typeof raw.batchId !== "string" || raw.batchId.length === 0) {
+      throw new ApplyJournalBlockedError("Apply journal batchId is invalid. Recovery blocked.");
+    }
+    if (typeof raw.phase !== "string" || !PHASES.has(raw.phase as ApplyJournalPhase)) {
+      throw new ApplyJournalBlockedError("Apply journal phase is invalid. Recovery blocked.");
+    }
+    if (!Array.isArray(raw.planned) || !Array.isArray(raw.backups)) {
+      throw new ApplyJournalBlockedError("Apply journal planned/backups must be arrays. Recovery blocked.");
+    }
+
+    const planned: ApplyJournalOp[] = [];
+    for (const item of raw.planned) {
+      if (!isRecord(item) || (item.kind !== "write" && item.kind !== "delete") || typeof item.rel !== "string") {
+        throw new ApplyJournalBlockedError("Apply journal planned op is invalid. Recovery blocked.");
+      }
+      this.assertJailedRel(item.rel);
+      planned.push({
+        kind: item.kind,
+        rel: item.rel,
+        mode: typeof item.mode === "number" ? item.mode : item.mode === null ? null : undefined,
+        beforeHash: typeof item.beforeHash === "string" || item.beforeHash === null ? item.beforeHash : undefined,
+        afterHash: typeof item.afterHash === "string" || item.afterHash === null ? item.afterHash : undefined
+      });
+    }
+
+    const backups: ApplyJournalBackup[] = [];
+    for (const item of raw.backups) {
+      if (!isRecord(item) || typeof item.rel !== "string") {
+        throw new ApplyJournalBlockedError("Apply journal backup is invalid. Recovery blocked.");
+      }
+      this.assertJailedRel(item.rel);
+      if (item.backupRel !== null && item.backupRel !== undefined) {
+        if (typeof item.backupRel !== "string") {
+          throw new ApplyJournalBlockedError("Apply journal backupRel is invalid. Recovery blocked.");
+        }
+        this.assertJailedRel(item.backupRel);
+      }
+      backups.push({
+        rel: item.rel,
+        backupRel: typeof item.backupRel === "string" ? item.backupRel : null,
+        beforeHash: typeof item.beforeHash === "string" || item.beforeHash === null ? item.beforeHash : undefined,
+        afterHash: typeof item.afterHash === "string" || item.afterHash === null ? item.afterHash : undefined
+      });
+    }
+
+    return {
+      workspaceId: this.workspaceId,
+      batchId: raw.batchId,
+      phase: raw.phase as ApplyJournalPhase,
+      planned,
+      backups,
+      error: typeof raw.error === "string" ? raw.error : undefined,
+      updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString()
+    };
   }
 
   public async recover(): Promise<{ recovered: boolean; blocked?: boolean }> {
@@ -58,9 +152,11 @@ export class ApplyJournal {
     }
     try {
       for (const item of [...journal.backups].reverse()) {
-        const to = path.join(this.projectRoot, item.rel);
+        const to = resolveProjectPath(this.projectRoot, item.rel);
+        const current = await readPresence(to);
+        if (this.isUserRepair(current, item)) continue;
         if (item.backupRel) {
-          const backupAbs = path.join(this.projectRoot, item.backupRel);
+          const backupAbs = resolveProjectPath(this.projectRoot, item.backupRel);
           await fs.mkdir(path.dirname(to), { recursive: true });
           await copyFileNoFollow(backupAbs, to);
         } else {
@@ -70,6 +166,7 @@ export class ApplyJournal {
       await this.clear();
       return { recovered: true };
     } catch (err) {
+      if (err instanceof ApplyJournalBlockedError) throw err;
       journal.phase = "blocked";
       journal.error = err instanceof Error ? err.message : String(err);
       journal.updatedAt = new Date().toISOString();
@@ -78,7 +175,8 @@ export class ApplyJournal {
     }
   }
 
-  public async begin(batchId: string, planned: { kind: "write" | "delete"; rel: string }[]): Promise<ApplyJournalEntry> {
+  public async begin(batchId: string, planned: ApplyJournalOp[]): Promise<ApplyJournalEntry> {
+    for (const op of planned) this.assertJailedRel(op.rel);
     const entry: ApplyJournalEntry = {
       workspaceId: this.workspaceId,
       batchId,
@@ -91,9 +189,21 @@ export class ApplyJournal {
     return entry;
   }
 
-  public async recordBackup(entry: ApplyJournalEntry, rel: string, backupRel: string | null): Promise<void> {
+  public async recordBackup(
+    entry: ApplyJournalEntry,
+    rel: string,
+    backupRel: string | null,
+    hashes?: { beforeHash?: string | null; afterHash?: string | null }
+  ): Promise<void> {
+    this.assertJailedRel(rel);
+    if (backupRel) this.assertJailedRel(backupRel);
     entry.phase = "applying";
-    entry.backups.push({ rel, backupRel });
+    entry.backups.push({
+      rel,
+      backupRel,
+      beforeHash: hashes?.beforeHash,
+      afterHash: hashes?.afterHash
+    });
     entry.updatedAt = new Date().toISOString();
     await atomicWriteJson(this.filePath, entry);
   }
@@ -114,11 +224,36 @@ export class ApplyJournal {
   }
 
   public async backupFile(staging: string, rel: string, from: string): Promise<string> {
+    this.assertJailedRel(rel);
     const backupRel = path.join(".designer", "apply-staging", path.basename(staging), rel);
-    const backupAbs = path.join(this.projectRoot, backupRel);
+    this.assertJailedRel(backupRel);
+    const backupAbs = resolveProjectPath(this.projectRoot, backupRel);
     await fs.mkdir(path.dirname(backupAbs), { recursive: true });
     await copyFileNoFollow(from, backupAbs);
-    return backupRel;
+    return backupRel.replace(/\\/g, "/");
+  }
+
+  private assertJailedRel(rel: string): void {
+    try {
+      resolveProjectPath(this.projectRoot, rel);
+    } catch (err) {
+      if (err instanceof PathJailError) {
+        throw new ApplyJournalBlockedError(`Apply journal path escapes the project (${rel}). Recovery blocked.`);
+      }
+      throw err;
+    }
+  }
+
+  private isUserRepair(
+    current: Awaited<ReturnType<typeof readPresence>>,
+    item: ApplyJournalBackup
+  ): boolean {
+    if (typeof item.afterHash !== "string" || item.afterHash.length === 0) return false;
+    if (current.kind !== "bytes") return false;
+    const now = contentHash(current.bytes);
+    if (now === item.afterHash) return false;
+    if (typeof item.beforeHash === "string" && now === item.beforeHash) return false;
+    return true;
   }
 }
 

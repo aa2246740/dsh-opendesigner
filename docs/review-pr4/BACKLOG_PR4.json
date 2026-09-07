@@ -1,0 +1,69 @@
+{
+  "date": "2026-09-07",
+  "baseSha": "4afc347d2367824bf61ab265659a6603a64ea8bd",
+  "openPr": 4,
+  "idPolicy": "PR3-xx IDs stay stable. This round is PR4-F01…PR4-F10. Do not claim PR3-01…14 all closed. Original OD-01…OD-18 stay frozen in docs/review-2026-09-07/.",
+  "gate": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr4/qa/*.test.mjs",
+  "findings": [
+    {
+      "id": "PR4-F01",
+      "mapsTo": "R01",
+      "title": "diffHash and receipts bind the frozen changeset",
+      "acceptance": "After approval, swapping worktree bytes at the same path invalidates the receipt. Apply writes the frozen candidate snapshot."
+    },
+    {
+      "id": "PR4-F02",
+      "mapsTo": "R05",
+      "title": "Write-time expected-before check",
+      "acceptance": "A user edit after conflict preflight is not overwritten."
+    },
+    {
+      "id": "PR4-F03",
+      "mapsTo": "R02 R03",
+      "title": "Journal recovery is honest",
+      "acceptance": "Corrupt JSON is BATCH_RECOVERY_BLOCKED. User repairs after half-apply are kept. Good replay (P02) still restores."
+    },
+    {
+      "id": "PR4-F04",
+      "mapsTo": "R04",
+      "title": "Journal paths stay in the path jail",
+      "acceptance": "../ in a journal does not write outside the project."
+    },
+    {
+      "id": "PR4-F05",
+      "mapsTo": "P04",
+      "title": "className comes from the selected node",
+      "acceptance": "main p-8 plus button indigo: emerald intent edits the button in source and on the canvas, not p-8."
+    },
+    {
+      "id": "PR4-F06",
+      "mapsTo": "R06 P05",
+      "title": "sliceEdits roundtrips",
+      "acceptance": "apply(before, sliceEdits(before, after)) === after for a long button label plus shadow-lg."
+    },
+    {
+      "id": "PR4-F07",
+      "mapsTo": "R07",
+      "title": "One writer and honest ack",
+      "acceptance": "Second runtime is RUNTIME_BUSY. writeCanvas ackRevision equals the version on disk."
+    },
+    {
+      "id": "PR4-F08",
+      "mapsTo": "",
+      "title": "Debug receipts are not human approval",
+      "acceptance": "Reject writes nothing. HTTP receipts are labeled debug-http and bind the exact diff hash."
+    },
+    {
+      "id": "PR4-F09",
+      "mapsTo": "",
+      "title": "Before-images keyed by workspace and worktree",
+      "acceptance": "Binary and unreadable are not stored as absent."
+    },
+    {
+      "id": "PR4-F10",
+      "mapsTo": "",
+      "title": "Keyword fallback must not invert intent",
+      "acceptance": "不要改颜色，只去掉阴影 does not add shadow-lg. Unsupported intents refuse and include currentClassName."
+    }
+  ]
+}

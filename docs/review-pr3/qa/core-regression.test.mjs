@@ -229,7 +229,7 @@ describe("N01 dangling external symlink must not create a file outside the proje
 
     const exists = await fs.stat(leakTarget).then(() => true).catch(() => false);
     assert.equal(exists, false);
-
+    await service.stop();
     await fs.rm(tmp, { recursive: true, force: true });
   });
 });

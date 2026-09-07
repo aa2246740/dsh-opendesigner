@@ -225,6 +225,8 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
             <button type="button" data-testid="ai-accept" id="od-ai-accept" disabled data-tooltip="Accept the proposal and checkpoint">接受</button>
             <button type="button" data-testid="ai-reject" id="od-ai-reject" disabled data-tooltip="Reject with no residue">拒绝</button>
           </div>
+          <div class="od-hint" data-testid="receipt-kind">Local HTTP debug receipts are not human approval of a seen diff. Accept binds the exact diff hash. Reject writes nothing.</div>
+          </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
           <div class="od-actions">
@@ -612,7 +614,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     if (result.success && result.proposal && typeof result.proposal === "object") {
       proposal = result.proposal as ChangeSetProposal;
       aiBannerEl.textContent = `proposal ${proposal.id} file=${proposal.filePath} hash=${proposal.sourceHash.slice(0, 8)}`;
-      aiEl.textContent = `${aiBannerEl.textContent}\nintent: ${instruction}\nbefore: ${proposal.beforeClassName}\nafter: ${proposal.afterClassName}\n${proposal.preview}\nAccept writes this file. Reject leaves the repo unchanged.`;
+    aiEl.textContent = `${aiBannerEl.textContent}\nintent: ${instruction}\nbefore: ${proposal.beforeClassName}\nafter: ${proposal.afterClassName}\ndiffHash bind: ${proposal.afterHash || proposal.sourceHash}\n${proposal.preview}\nAccept writes this file. Reject leaves the repo unchanged.`;
       syncProposalButtons();
       return;
     }
@@ -650,7 +652,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     await callTool("reject_source_patch");
     proposal = null;
     aiBannerEl.textContent = "ChangeSet rejected with no residue";
-    aiEl.textContent = "Rejected. Store and repo unchanged.";
+    aiEl.textContent = "Rejected. Store and repo unchanged. No write.";
     syncProposalButtons();
     render();
   });
@@ -771,6 +773,7 @@ if (typeof window !== "undefined") {
           if (!issued.ok || receipt.success === false || typeof receipt.approvalReceipt !== "string") {
             return { success: false, error: receipt.error || "DENIED: no approval receipt", code: "DENIED" };
           }
+          persistEl.textContent = `debug receipt (${String(receipt.receiptKind || "debug-http")}) ≠ human approval of seen diff. tool=${tool} diffHash=${String(receipt.diffHash || "").slice(0, 16)}`;
           payloadArgs = { ...payloadArgs, approvalReceipt: receipt.approvalReceipt };
         }
         const res = await fetch("/api/tool", {
