@@ -22,40 +22,75 @@ Install with a clean `$DSH_HOME` and `dsh plugin --profile web add`. Do not vend
 | Domain service | `src/server/index.ts` `OpenDesignerService` |
 | Tool catalog | `src/server/mcpTools.ts` |
 | Host adapter | `src/server/dshAdapter.ts` (`defineTool`, JSON Schema `output.schema`) |
-| Path jail | `src/server/pathJail.ts` |
-| Destructive approval | `src/server/approval.ts` |
-| Checkpoints / Rewind | `src/server/checkpoints.ts` |
+| Path jail | `src/server/pathJail.ts` (realpath, then jail) |
+| Destructive approval | `src/server/approval.ts` (host/UI channel only) |
+| Checkpoints / Rewind | `src/server/checkpoints.ts` (deep-copied snapshots) |
 | Working-copy autosave | `.designer/canvas.json` via `atomicWrite.ts` |
 | Agent batch worktrees | `src/server/agentBatch.ts` |
-| Client library | `src/client/*`, bundled to `lib/client.js` (no Babel; Tailwind merge lives in `src/compiler/tailwindMerge.ts`) |
+| Client library | `src/client/*`, bundled to `lib/client.js` |
 | Live preview | `preview.html` + `src/client/previewApp.ts` + `scripts/preview-server.mjs` |
 
-DSH loads the package main (`dist/plugin.js` after `npm run build`). Tests import TypeScript under `src/`. There is no `dsh.client` declaration. The preview is the designer UI. A malformed `dsh.client` row fails web boot.
+DSH loads the package main (`dist/plugin.js` after `npm run build`). Tests import TypeScript under `src/`. There is no `dsh.client` declaration. The preview is the designer UI.
+
+## What Apply means now
+
+There are two buttons. They are not aliases.
+
+| UI | Tool | Writes |
+|---|---|---|
+| **保存设计稿** | `opendesigner_apply_to_project` | `.designer/canvas.json` and `.designer/applied.json`. The design draft. Not project source. |
+| **应用到工程** | `opendesigner_batch_apply` | Real file diffs from an open Agent batch. Shown first via `opendesigner_batch_preview`. Disabled when there are no diffs. |
+
+应用到工程 refuses the whole batch when a main-tree file diverged from `baseRef` (`BATCH_CONFLICT`). It includes committed worktree changes, treats rename as delete+write, parses Git paths with `-z`, and rolls back earlier files if a later copy fails.
+
+Create batch fails with `DIRTY_WORKTREE` when the project has uncommitted files outside `.designer`.
+
+## Accept / reject
+
+Local ops (fill, radius, padding, text color, shadow, drag) write the live className and push a checkpoint. **Rewind** undoes them.
+
+The model path is a ChangeSet:
+
+1. Select a node.
+2. Type intent in zh or en.
+3. **提出修改** asks the live model for a scoped className proposal. It does not mutate the store.
+4. **接受** applies the proposal and checkpoints. Rewind undoes it.
+5. **拒绝** drops the proposal. The store is unchanged.
+
+If no live provider is configured, **提出修改** stays disabled. There is no hardcoded `Add shadow-lg to the button className` demo. Shadow is a local inspector chip.
+
+`approve: true` in model tool arguments is ignored. Preview `/api/tool` is the trusted host channel.
+
+## How to open a real project
+
+```sh
+npm install
+npm run build
+npm test
+npm run test:review
+OPENDESIGNER_PROJECT_ROOT=/absolute/path/to/your/react-app npm run preview
+```
+
+Default preview project is `examples/programmer-page`, a real React + Tailwind `App.tsx`. Do not point preview at `test-fixtures`. The UI and Agent share one `projectId` and `storeVersion`. A stale whole-canvas POST is rejected (`STALE_HYDRATE`).
+
+Open `http://127.0.0.1:4173/`. The preview server only serves `preview.html`, `preview/`, and `lib/`.
 
 ## Tools
 
-The catalog still has 38 names so existing call sites keep working. Host registration prefixes them with `opendesigner_` and wraps each with `defineTool` from `@deepseek-ai/dsh-tools@0.1.2-rc.1`. That prefix avoids colliding with DSH built-ins. `output.schema` is `{ type: "object", additionalProperties: true }`. Execute honors `exec.signal` abort.
+The catalog still has 38 names so existing call sites keep working. Persistence tools are extra host tools with the `opendesigner_` prefix, including `batch_preview`.
 
 Honest behavior:
 
-- File tools: real I/O, jailed, destructive tools need `approve: true` or `autoApprove`.
-- Canvas tools: in-memory `FlatStore`. `canvas_insert` uses top-level `tag` / `props` / `textContent`.
-- `take_screenshot`: fail closed, or `jsx-svg` snapshot.
-- `get_theme`, `search_icons`, `set_icon_library`: stubs. Marked here so README cannot claim otherwise.
-- Skills: `opendesigner-design`, `opendesigner-import-from-project`, `opendesigner-compositions`.
+- File tools: real I/O, jailed with realpath, destructive tools need a host approval channel or `autoApprove`.
+- Canvas tools: in-memory `FlatStore` with graph validation (missing parents, cycles, dangling page roots).
+- `take_screenshot`: `html-render` is bound to `ComponentSandbox` HTML and may verify a claim. `jsx-svg` never counts as visual proof. `none` fails closed.
+- Claims: overlapping ancestor/descendant locks are conflicts. Releasing an expired claim does not drop a newer live lock.
+- `get_theme`, `search_icons`, `set_icon_library`: stubs.
 
-## AI
+## Review gate
 
-`AIGateway` is an OpenAI-compatible `chat/completions` client. Mock mode is the default without a key. Provider detection lives in `detectLiveProvidersFromEnv`. Preview `/api/ai-merge` is live-only unless `OPENDESIGNER_FORCE_MOCK=1`.
+```sh
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-2026-09-07/qa/*.test.mjs
+```
 
-## Save model
-
-Worktrees are for Agent batches that may rewrite project source. They are not the only Rewind, and they are not spawned per canvas gesture.
-
-1. **Checkpoints / Rewind.** `CheckpointLog` is a bounded stack (50) of canvas JSON plus optional session source files. Host tools: `opendesigner_checkpoint`, `opendesigner_rewind`, `opendesigner_list_checkpoints`. Canvas and source mutations push a checkpoint. Rewind restores the snapshot. No worktree is created.
-2. **Working-copy autosave.** `opendesigner_autosave` and canvas tools write `.designer/canvas.json` with temp-file rename. This is crash safety, not history. Timed preview autosave calls this only.
-3. **Agent batch worktree.** `opendesigner_batch_create` runs `git worktree add` at `.designer/worktrees/<batchId>` on branch `opendesigner/batch-*`. The project root must be the git toplevel. File tools then jail to that worktree. `opendesigner_batch_discard` removes it. `opendesigner_batch_apply` copies jailed files into the main tree, then removes the worktree. No git commit. If the project is not a git repo, create returns `{ code: "GIT_REQUIRED" }`.
-4. **Explicit Save / Apply to project.** `opendesigner_apply_to_project` is gated. It writes the working copy and `.designer/applied.json`. It does not `git commit`.
-5. **Approval policy.** Canvas style/geometry tools are auto-allowed (`destructive` unset). Source writes, apply-to-project, and batch apply are gated. `autoApprove` skips the prompt only. Path jail is always on.
-
-The 38-name catalog is unchanged. Persistence tools are extra host tools with the `opendesigner_` prefix.
+See `docs/review-2026-09-07/BACKLOG.json` for OD-01…OD-18.

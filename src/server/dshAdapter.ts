@@ -182,7 +182,7 @@ export function extraApproveParam(tool: MCPToolDefinition): DshToolParameters {
     approve: {
       type: "boolean",
       description:
-        "Set true after an explicit host confirmation. Required unless autoApprove is enabled. Does not expand the project-root jail."
+        "Ignored unless the host/UI marks the call as a trusted approval channel. The model cannot authorize destructive tools by setting this flag."
     }
   };
 }

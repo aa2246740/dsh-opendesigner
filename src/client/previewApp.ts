@@ -7,7 +7,7 @@ import { bindPreviewCanvasUx, bindFloatingTooltips, refreshOverlay } from "./pre
 export interface PreviewApi {
   getStatus?: () => Promise<Record<string, unknown>>;
   getCanvas?: () => Promise<Record<string, unknown>>;
-  pushCanvas?: (store: Record<string, unknown>) => Promise<void>;
+  pushCanvas?: (store: Record<string, unknown>) => Promise<{ success?: boolean; version?: number; error?: string }>;
   callTool?: (tool: string, args?: Record<string, unknown>) => Promise<Record<string, unknown>>;
   applyAiMerge?: (
     source: string,
@@ -21,8 +21,28 @@ export interface PreviewApi {
     liveError?: string;
     mockMode?: boolean;
     provider?: string;
-    attemptsLog?: Array<{ provider: string; model: string; label?: string; ok?: boolean; httpStatus?: number; error?: string }>;
+    attemptsLog?: Array<{
+      provider: string;
+      model: string;
+      label?: string;
+      ok?: boolean;
+      httpStatus?: number;
+      error?: string;
+    }>;
   }>;
+}
+
+export interface ChangeSetProposal {
+  id: string;
+  instruction: string;
+  elementId: string;
+  beforeClassName: string;
+  afterClassName: string;
+  mergedCode: string;
+}
+
+export function autosaveClearsDirty(httpOk: boolean, result: { success?: boolean } | undefined): boolean {
+  return httpOk && result?.success !== false;
 }
 
 const CARD_ID = "hero-card";
@@ -36,6 +56,7 @@ const FILL_SWATCHES = ["slate-900", "emerald-600", "indigo-600", "rose-600"];
 const TEXT_SWATCHES = ["slate-100", "amber-300", "rose-400", "emerald-400"];
 const RADIUS_VALUES = ["none", "md", "xl", "full"];
 const PADDING_VALUES = ["2", "4", "6", "8"];
+const SHADOW_VALUES = ["none", "sm", "md", "lg"];
 
 function seedStore(store: FlatStore): void {
   store.setElement({
@@ -72,7 +93,7 @@ function seedStore(store: FlatStore): void {
     type: "element",
     tag: "p",
     props: { className: "text-xs text-slate-400 mt-2 leading-relaxed" },
-    textContent: "Code is the canvas. Style edits update the live className with deterministic Tailwind slot merge.",
+    textContent: "Select a region. State intent. Accept or reject. Apply writes real file diffs, not only canvas.json.",
     canvasRect: { left: 76, top: 136, width: 320, height: 48 }
   });
   store.setElement({
@@ -83,7 +104,7 @@ function seedStore(store: FlatStore): void {
       className: "mt-4 px-4 py-2 bg-indigo-600 text-white text-xs font-semibold rounded-lg",
       "data-testid": "primary-btn"
     },
-    textContent: "Build",
+    textContent: "Pay now",
     canvasRect: { left: 76, top: 200, width: 88, height: 32 }
   });
   store.attachChild(CARD_ID, BADGE_ID);
@@ -110,10 +131,15 @@ function listElementIds(store: FlatStore): string[] {
   return Object.keys(store.toJSON().byId);
 }
 
+function extractClassName(code: string): string | null {
+  const match = code.match(/className="([^"]*)"/);
+  return match ? match[1] : null;
+}
+
 function swatchButtons(prefix: string, values: string[], kind: "bg" | "text"): string {
   return values
     .map((value) => {
-      const colorClass = kind === "bg" ? `bg-${value}` : `bg-${value}`;
+      const colorClass = `bg-${value}`;
       return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" data-tooltip="${kind === "bg" ? "Fill" : "Text"} ${value}"></button>`;
     })
     .join("");
@@ -124,6 +150,11 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   const panel = new CanvasPanel({ store, handleSize: 12 });
   let dirty = false;
   let openBatchId: string | null = null;
+  let lastSeenVersion = 0;
+  let projectId: string | null = null;
+  let proposal: ChangeSetProposal | null = null;
+  let hasLiveModel = false;
+  let fileDiffCount = 0;
 
   function syncGeometry(): void {
     panel.clearRegisteredRects();
@@ -143,7 +174,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       <header class="od-header">
         <div>
           <div class="od-title">dsh-opendesigner</div>
-          <div class="od-sub">DeepSeek Harness plugin preview</div>
+          <div class="od-sub">Select a region, state intent, accept or reject. Apply is a file diff.</div>
         </div>
         <div id="od-status" class="od-status" data-testid="plugin-status">loading status</div>
       </header>
@@ -163,29 +194,36 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
           <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
         </div>
         <aside class="od-styles">
-          <div class="od-styles-title">Styles</div>
+          <div class="od-styles-title">Styles (local)</div>
           <div id="od-selected" class="od-mono" data-testid="selected-id"></div>
           <div id="od-inspector" class="od-inspector" data-testid="styles-inspector"></div>
           <div class="od-actions">
-            <button type="button" data-testid="edit-fill" id="od-edit-fill" data-tooltip="Fill emerald shortcut">Fill emerald</button>
-            <button type="button" data-testid="edit-radius" id="od-edit-radius" data-tooltip="Radius xl shortcut">Radius xl</button>
-            <button type="button" data-testid="ai-merge" id="od-ai-merge" data-tooltip="AI merge: live providers only (OpenRouter MiniMax free → MiniMax CN → Gemini → DeepSeek → OpenAI)">AI merge</button>
+            <button type="button" data-testid="edit-fill" id="od-edit-fill" data-tooltip="Local fill emerald">Fill emerald</button>
+            <button type="button" data-testid="edit-radius" id="od-edit-radius" data-tooltip="Local radius xl">Radius xl</button>
+            <button type="button" data-testid="edit-shadow" id="od-edit-shadow" data-tooltip="Local shadow-lg">Shadow lg</button>
+          </div>
+          <div class="od-styles-title">Intent (zh/en)</div>
+          <textarea id="od-intent" class="od-intent" data-testid="ai-intent" rows="3" placeholder="例如：把按钮改成翠绿 / make the button emerald"></textarea>
+          <div class="od-actions">
+            <button type="button" data-testid="ai-propose" id="od-ai-propose" data-tooltip="Propose a scoped ChangeSet. Does not write until you accept.">提出修改</button>
+            <button type="button" data-testid="ai-accept" id="od-ai-accept" disabled data-tooltip="Accept the proposal and checkpoint">接受</button>
+            <button type="button" data-testid="ai-reject" id="od-ai-reject" disabled data-tooltip="Reject with no residue">拒绝</button>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
           <div class="od-actions">
             <button type="button" data-testid="rewind" id="od-rewind" data-tooltip="Rewind one checkpoint">Rewind</button>
-            <button type="button" data-testid="apply-project" id="od-apply-project" data-tooltip="Save working copy to the project">Save / Apply to project</button>
+            <button type="button" data-testid="save-design" id="od-save-design" data-tooltip="Write .designer/canvas.json only">保存设计稿</button>
+            <button type="button" data-testid="apply-files" id="od-apply-files" disabled data-tooltip="Apply real file diffs from the open agent batch">应用到工程</button>
           </div>
           <div class="od-styles-title">Agent batch</div>
           <div class="od-actions">
             <button type="button" data-testid="batch-create" id="od-batch-create" data-tooltip="Create an isolated agent worktree">Create batch</button>
             <button type="button" data-testid="batch-write" id="od-batch-write" data-tooltip="Write a jailed file inside the batch worktree">Write batch file</button>
-            <button type="button" data-testid="batch-apply" id="od-batch-apply" data-tooltip="Apply the agent worktree to the project">Apply batch</button>
             <button type="button" data-testid="batch-discard" id="od-batch-discard" data-tooltip="Discard the agent worktree">Discard batch</button>
           </div>
           <pre id="od-persist" class="od-mono" data-testid="persist-log">persistence idle</pre>
-          <pre id="od-ai-banner" class="od-mono" data-testid="ai-live-banner">AI merge: live-only (no mock)</pre>
+          <pre id="od-ai-banner" class="od-mono" data-testid="ai-live-banner">Model path: propose ChangeSet, then accept or reject</pre>
           <pre id="od-class" class="od-mono" data-testid="class-output"></pre>
           <pre id="od-ai" class="od-mono" data-testid="ai-output"></pre>
           <div class="od-styles-title">Stubs</div>
@@ -207,9 +245,24 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   const inspectorEl = root.querySelector("#od-inspector") as HTMLElement;
   const hudEl = root.querySelector("#od-hud") as HTMLElement;
   const zoomLabelEl = root.querySelector("#od-zoom-label") as HTMLElement;
+  const intentEl = root.querySelector("#od-intent") as HTMLTextAreaElement;
+  const proposeBtn = root.querySelector("#od-ai-propose") as HTMLButtonElement;
+  const acceptBtn = root.querySelector("#od-ai-accept") as HTMLButtonElement;
+  const rejectBtn = root.querySelector("#od-ai-reject") as HTMLButtonElement;
+  const applyFilesBtn = root.querySelector("#od-apply-files") as HTMLButtonElement;
 
   function selectedId(): string {
     return panel.selection.getSelectedIds()[0] || "";
+  }
+
+  function syncProposalButtons(): void {
+    acceptBtn.disabled = !proposal;
+    rejectBtn.disabled = !proposal;
+    applyFilesBtn.disabled = !openBatchId || fileDiffCount === 0;
+    proposeBtn.disabled = !hasLiveModel;
+    proposeBtn.title = hasLiveModel
+      ? "Propose a scoped ChangeSet"
+      : "No live model configured. Local style edits still work.";
   }
 
   function updateHud(): void {
@@ -227,14 +280,11 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   function renderInspector(): void {
     const id = selectedId();
     if (!id) {
-      inspectorEl.innerHTML = `<div class="od-hint">Select an element to edit fill, radius, padding, and text color.</div>`;
+      inspectorEl.innerHTML = `<div class="od-hint">Select an element to edit fill, radius, padding, text color, and shadow locally.</div>`;
       return;
     }
     const className = classNameOf(store, id);
     const parsed = StylesPanelManager.parseClasses(className);
-    const sections = StylesPanelManager.buildPanelSections(className);
-    const wanted = new Set(["backgroundColor", "borderRadius", "padding", "textColor"]);
-    const present = sections.flatMap((section) => section.controls).filter((control) => wanted.has(control.name));
     inspectorEl.innerHTML = `
       <div class="od-field">
         <div class="od-field-label">Fill ${parsed.backgroundColor || ""}</div>
@@ -252,7 +302,10 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
         <div class="od-field-label">Text color ${parsed.textColor || ""}</div>
         <div class="od-swatches">${swatchButtons("style-text", TEXT_SWATCHES, "text")}</div>
       </div>
-      <div class="od-hint">${present.map((control) => control.name).join(" · ")}</div>
+      <div class="od-field">
+        <div class="od-field-label">Shadow</div>
+        <div class="od-chip-row">${SHADOW_VALUES.map((value) => `<button type="button" data-testid="style-shadow-${value}" data-shadow="${value}" data-tooltip="Local shadow ${value}">${value}</button>`).join("")}</div>
+      </div>
     `;
   }
 
@@ -278,6 +331,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     selectedEl.textContent = id || "(none)";
     classEl.textContent = id ? classNameOf(store, id) : "";
     updateHud();
+    syncProposalButtons();
     if (options.preserveViewport) refreshOverlay(canvasEl, panel);
   }
 
@@ -286,9 +340,42 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     const status = await api.getStatus();
     const persistence = (status.persistence || {}) as Record<string, unknown>;
     const ai = (status.ai || {}) as Record<string, unknown>;
-    statusEl.textContent = `plugin ${status.name} | jail ${status.projectRoot} | autoApprove=${status.autoApprove} | ai ${ai.provider || "none"}/${ai.model || "none"} mock=${ai.mockMode === true} hasApiKey=${ai.hasApiKey === true}`;
-    autosaveEl.textContent = `working copy ${persistence.lastAutosaveAt || "none"} | checkpoints ${persistence.checkpointCount ?? 0} | current ${persistence.currentCheckpointLabel || "none"}`;
+    projectId = typeof status.projectId === "string" ? status.projectId : projectId;
+    if (typeof status.storeVersion === "number") lastSeenVersion = status.storeVersion;
+    hasLiveModel = ai.hasApiKey === true && ai.mockMode !== true;
+    statusEl.textContent = `plugin ${status.name} | project ${projectId || "—"} v${lastSeenVersion} | jail ${status.projectRoot} | ai ${ai.provider || "none"}/${ai.model || "none"} hasApiKey=${ai.hasApiKey === true}`;
+    autosaveEl.textContent = `working copy ${persistence.lastAutosaveAt || "none"} | checkpoints ${persistence.checkpointCount ?? 0} | current ${persistence.currentCheckpointLabel || "none"} | dirty=${dirty}`;
     openBatchId = typeof persistence.openBatchId === "string" ? persistence.openBatchId : null;
+    fileDiffCount = 0;
+    if (openBatchId && api.callTool) {
+      const diffs = await api.callTool("batch_preview", { batchId: openBatchId });
+      if (Array.isArray(diffs.diffs)) fileDiffCount = diffs.diffs.length;
+      else if (Array.isArray(diffs.copied)) fileDiffCount = diffs.copied.length;
+    }
+    syncProposalButtons();
+  }
+
+  async function pushAuthoritativeCanvas(): Promise<boolean> {
+    if (!api.pushCanvas) return true;
+    const payload = {
+      ...store.toJSON(),
+      projectId,
+      version: lastSeenVersion + 1,
+      baseVersion: lastSeenVersion
+    };
+    try {
+      const result = await api.pushCanvas(payload);
+      if (result.success === false) {
+        persistEl.textContent = JSON.stringify(result, null, 2);
+        return false;
+      }
+      if (typeof result.version === "number") lastSeenVersion = result.version;
+      else lastSeenVersion += 1;
+      return true;
+    } catch (err) {
+      persistEl.textContent = `push failed: ${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    }
   }
 
   async function callTool(tool: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
@@ -296,22 +383,25 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
       persistEl.textContent = "persistence API is not attached.";
       return { success: false, error: "no persistence API" };
     }
-    if (api.pushCanvas && (tool === "checkpoint" || tool === "autosave" || tool === "apply_to_project")) {
-      await api.pushCanvas(store.toJSON());
+    if (tool === "checkpoint" || tool === "autosave" || tool === "apply_to_project") {
+      const pushed = await pushAuthoritativeCanvas();
+      if (!pushed) return { success: false, error: "STALE_HYDRATE" };
     }
     const result = await api.callTool(tool, args);
     const shown = { ...result };
     if (shown.store) shown.store = { restored: true };
     persistEl.textContent = JSON.stringify(shown, null, 2);
+    if (typeof result.version === "number") lastSeenVersion = result.version as number;
     await refreshStatus();
     return result;
   }
 
   async function checkpointAndAutosave(label: string): Promise<void> {
     markDirty();
-    await callTool("checkpoint", { label, kind: "canvas" });
-    await callTool("autosave");
-    dirty = false;
+    const cp = await callTool("checkpoint", { label, kind: "canvas" });
+    if (cp.success === false) return;
+    const auto = await callTool("autosave");
+    if (autosaveClearsDirty(true, auto)) dirty = false;
   }
 
   function applyStyle(property: keyof ParsedStyles, value: string, label: string): void {
@@ -321,6 +411,16 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     setClassName(store, id, next);
     render();
     void checkpointAndAutosave(label);
+  }
+
+  function applyLocalShadow(value: string): void {
+    const id = selectedId() || CARD_ID;
+    if (!selectedId()) panel.select([id]);
+    const token = value === "none" ? "shadow-none" : `shadow-${value}`;
+    const next = mergeTailwindClasses(classNameOf(store, id), token);
+    setClassName(store, id, next);
+    render();
+    void checkpointAndAutosave(`shadow-${value}`);
   }
 
   function insertBox(): void {
@@ -360,6 +460,12 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     updateHud();
   }
 
+  function clearProposal(message: string): void {
+    proposal = null;
+    aiEl.textContent = message;
+    syncProposalButtons();
+  }
+
   layersEl.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     const id = target.getAttribute("data-id");
@@ -378,10 +484,12 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     const text = target.getAttribute("data-testid")?.startsWith("style-text-")
       ? target.getAttribute("data-value")
       : null;
+    const shadow = target.getAttribute("data-shadow");
     if (fill) applyStyle("backgroundColor", fill, `fill-${fill}`);
     else if (radius) applyStyle("borderRadius", radius, `radius-${radius}`);
     else if (padding) applyStyle("padding", padding, `padding-${padding}`);
     else if (text) applyStyle("textColor", text, `text-${text}`);
+    else if (shadow) applyLocalShadow(shadow);
   });
 
   root.querySelector("#od-edit-fill")!.addEventListener("click", () => {
@@ -397,18 +505,39 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     void checkpointAndAutosave("radius-xl");
   });
 
+  root.querySelector("#od-edit-shadow")!.addEventListener("click", () => {
+    applyLocalShadow("lg");
+  });
+
   root.querySelector("#od-rewind")!.addEventListener("click", async () => {
     const result = await callTool("rewind");
     if (result.success && result.store) {
       store.fromJSON(result.store);
       const ids = listElementIds(store);
       panel.select(ids.includes(CARD_ID) ? [CARD_ID] : ids.slice(0, 1));
+      clearProposal("Rewound. No pending ChangeSet.");
       render();
     }
   });
 
-  root.querySelector("#od-apply-project")!.addEventListener("click", () => {
+  root.querySelector("#od-save-design")!.addEventListener("click", () => {
     void callTool("apply_to_project", { approve: true });
+  });
+
+  root.querySelector("#od-apply-files")!.addEventListener("click", async () => {
+    if (!openBatchId || fileDiffCount === 0) {
+      persistEl.textContent = JSON.stringify({
+        success: false,
+        error: "应用到工程 needs an open batch with file diffs"
+      });
+      return;
+    }
+    const result = await callTool("batch_apply", { batchId: openBatchId, approve: true });
+    if (result.success === true) {
+      openBatchId = null;
+      fileDiffCount = 0;
+    }
+    syncProposalButtons();
   });
 
   root.querySelector("#od-batch-create")!.addEventListener("click", async () => {
@@ -419,20 +548,17 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
   });
 
   root.querySelector("#od-batch-write")!.addEventListener("click", () => {
-    void callTool("project_write", {
-      path: BATCH_FILE,
-      content: "agent-batch isolation write\n",
-      approve: true
-    });
-  });
-
-  root.querySelector("#od-batch-apply")!.addEventListener("click", async () => {
     if (!openBatchId) {
-      persistEl.textContent = JSON.stringify({ success: false, error: "no open batch" });
+      persistEl.textContent = JSON.stringify({
+        success: false,
+        error: "Create an Agent batch before writing isolated file diffs"
+      });
       return;
     }
-    await callTool("batch_apply", { batchId: openBatchId, approve: true });
-    openBatchId = null;
+    void callTool("project_write_batch", {
+      files: [{ path: BATCH_FILE, content: "agent-batch isolation write\n" }],
+      approve: true
+    });
   });
 
   root.querySelector("#od-batch-discard")!.addEventListener("click", async () => {
@@ -442,34 +568,80 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     }
     await callTool("batch_discard", { batchId: openBatchId });
     openBatchId = null;
+    fileDiffCount = 0;
+    syncProposalButtons();
   });
 
-  root.querySelector("#od-ai-merge")!.addEventListener("click", async () => {
+  proposeBtn.addEventListener("click", async () => {
+    if (!hasLiveModel) {
+      aiBannerEl.textContent = "Model path gated: no live provider. Use local style edits.";
+      aiEl.textContent = "提出修改 is disabled until a live model is configured.";
+      return;
+    }
     if (!api.applyAiMerge) {
       aiEl.textContent = "AI merge endpoint is not attached.";
       return;
     }
     const id = selectedId() || BTN_ID;
-    const source = `<button className="${classNameOf(store, id)}">${store.getElement(id)?.textContent || ""}</button>`;
-    const result = await api.applyAiMerge(source, "Add shadow-lg to the button className");
+    if (!selectedId()) panel.select([id]);
+    const instruction = intentEl.value.trim();
+    if (!instruction) {
+      aiEl.textContent = "Write an intent in zh or en before proposing.";
+      return;
+    }
+    const before = classNameOf(store, id);
+    const source = `<button className="${before}">${store.getElement(id)?.textContent || ""}</button>`;
+    const result = await api.applyAiMerge(source, instruction);
     const attempts = (result.attemptsLog || [])
       .map((row) => `${row.label || row.provider} HTTP ${row.httpStatus ?? "err"} ${row.ok ? "ok" : "fail"}`)
       .join("\n");
     if (result.success && result.mergedCode && result.fallback !== true && result.mockMode !== true) {
-      const match = result.mergedCode.match(/className="([^"]*)"/);
-      if (match) setClassName(store, id, match[1]);
-      const banner = `provider=${result.provider || "unknown"} model=${result.model || "unknown"} mock=false`;
-      aiBannerEl.textContent = banner;
-      aiEl.textContent = `${banner}\n${attempts}\n${result.mergedCode}`;
-      render();
-      void checkpointAndAutosave("ai-merge");
-    } else if (result.success && result.fallback) {
-      aiBannerEl.textContent = `mock fallback (offline demo only) model=${result.model || "mock-offline"}`;
-      aiEl.textContent = `live failed: ${result.liveError || "provider error"}\nfallback=mock-offline\n${attempts}\n${result.mergedCode || ""}`;
-    } else {
-      aiBannerEl.textContent = "AI merge live failed (no mock)";
-      aiEl.textContent = `${result.error || "AI merge failed"}\n${attempts}`;
+      const after = extractClassName(result.mergedCode) || before;
+      proposal = {
+        id: `cs_${Date.now()}`,
+        instruction,
+        elementId: id,
+        beforeClassName: before,
+        afterClassName: after,
+        mergedCode: result.mergedCode
+      };
+      aiBannerEl.textContent = `proposal ready provider=${result.provider || "unknown"} model=${result.model || "unknown"}`;
+      aiEl.textContent = `${aiBannerEl.textContent}\nintent: ${instruction}\nbefore: ${before}\nafter: ${after}\n${attempts}\nAccept to apply. Reject to drop.`;
+      syncProposalButtons();
+      return;
     }
+    proposal = null;
+    syncProposalButtons();
+    if (result.success && result.fallback) {
+      aiBannerEl.textContent = "live failed; mock is not applied";
+      aiEl.textContent = `live failed: ${result.liveError || "provider error"}\n${attempts}`;
+      return;
+    }
+    aiBannerEl.textContent = "AI propose failed";
+    aiEl.textContent = `${result.error || "AI merge failed"}\n${attempts}`;
+  });
+
+  acceptBtn.addEventListener("click", () => {
+    if (!proposal) return;
+    setClassName(store, proposal.elementId, proposal.afterClassName);
+    const accepted = proposal;
+    proposal = null;
+    render();
+    void checkpointAndAutosave("changeset-accept");
+    aiEl.textContent = `Accepted ${accepted.id}. Rewind undoes it.`;
+    syncProposalButtons();
+  });
+
+  rejectBtn.addEventListener("click", () => {
+    if (!proposal) return;
+    const before = classNameOf(store, proposal.elementId);
+    clearProposal("Rejected. Store unchanged.");
+    if (before !== proposal?.beforeClassName) {
+      // proposal already nulled; residue check uses captured before
+    }
+    void before;
+    aiBannerEl.textContent = "ChangeSet rejected with no residue";
+    render();
   });
 
   root.querySelector("#od-insert-box")!.addEventListener("click", () => insertBox());
@@ -500,8 +672,10 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
 
   window.setInterval(() => {
     if (!dirty) return;
-    dirty = false;
-    void callTool("autosave");
+    void (async () => {
+      const result = await callTool("autosave");
+      if (autosaveClearsDirty(true, result)) dirty = false;
+    })();
   }, 8000);
 
   void (async () => {
@@ -518,6 +692,8 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
         const canvas = await api.getCanvas();
         if (canvas && canvas.byId && Object.keys(canvas.byId as object).length > 0) {
           store.fromJSON(canvas);
+          if (typeof canvas.version === "number") lastSeenVersion = canvas.version as number;
+          if (typeof canvas.projectId === "string") projectId = canvas.projectId;
           restored = true;
         }
       }
@@ -546,18 +722,23 @@ if (typeof window !== "undefined") {
     mountPreview(host, {
       getStatus: async () => {
         const res = await fetch("/api/status");
+        if (!res.ok) throw new Error(`status HTTP ${res.status}`);
         return await res.json();
       },
       getCanvas: async () => {
         const res = await fetch("/api/canvas");
+        if (!res.ok) throw new Error(`canvas HTTP ${res.status}`);
         return await res.json();
       },
       pushCanvas: async (canvas) => {
-        await fetch("/api/canvas", {
+        const res = await fetch("/api/canvas", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(canvas)
         });
+        const body = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }));
+        if (!res.ok) return { success: false, error: body.error || `HTTP ${res.status}` };
+        return body;
       },
       callTool: async (tool, args = {}) => {
         const res = await fetch("/api/tool", {
@@ -565,6 +746,7 @@ if (typeof window !== "undefined") {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ tool, args })
         });
+        if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
         return await res.json();
       },
       applyAiMerge: async (source, instruction) => {
@@ -573,6 +755,7 @@ if (typeof window !== "undefined") {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sourceCode: source, instruction })
         });
+        if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
         return await res.json();
       }
     });

@@ -6,6 +6,15 @@ function createId(): string {
   return crypto.randomUUID();
 }
 
+export class GraphError extends Error {
+  readonly code = "GRAPH_INVALID";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "GraphError";
+  }
+}
+
 export type ElementType = "element" | "text" | "component" | "capture";
 
 export interface CanvasRect {
@@ -29,7 +38,7 @@ export interface FEElement {
   textContent?: string;
   canvasRect?: CanvasRect;
   sourceLocation?: SourceLocation;
-  captureDataUrl?: string; // 渲染崩溃时的兜底快照
+  captureDataUrl?: string;
 }
 
 export interface PageMeta {
@@ -37,6 +46,17 @@ export interface PageMeta {
   name: string;
   isLoaded: boolean;
   rootElementId: string;
+}
+
+export interface FlatStoreJson {
+  byId: Record<string, FEElement>;
+  childrenByParent: Record<string, string[]>;
+  parentByChild: Record<string, string>;
+  pages: PageMeta[];
+  activePageId: string;
+  projectId?: string;
+  version?: number;
+  savedAt?: string;
 }
 
 export interface FlatStoreState {
@@ -47,53 +67,102 @@ export interface FlatStoreState {
   activePageId: string;
 }
 
+function emptyState(): FlatStoreState {
+  return {
+    byId: new Map(),
+    childrenByParent: new Map(),
+    parentByChild: new Map(),
+    pages: [],
+    activePageId: ""
+  };
+}
+
+export function assertValidGraph(data: FlatStoreJson): void {
+  const byId = data.byId || {};
+  const childrenByParent = data.childrenByParent || {};
+  const parentByChild = data.parentByChild || {};
+  const pages = data.pages || [];
+
+  for (const [parentId, children] of Object.entries(childrenByParent)) {
+    if (!byId[parentId]) {
+      throw new GraphError(`Missing parent node ${parentId}`);
+    }
+    if (!Array.isArray(children)) {
+      throw new GraphError(`childrenByParent.${parentId} must be an array`);
+    }
+    for (const childId of children) {
+      if (!byId[childId]) {
+        throw new GraphError(`Missing child node ${childId} under ${parentId}`);
+      }
+    }
+  }
+
+  for (const [childId, parentId] of Object.entries(parentByChild)) {
+    if (!byId[childId]) {
+      throw new GraphError(`parentByChild references missing child ${childId}`);
+    }
+    if (!byId[parentId]) {
+      throw new GraphError(`parentByChild references missing parent ${parentId}`);
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string): void => {
+    if (visited.has(id)) return;
+    if (visiting.has(id)) {
+      throw new GraphError(`Cycle detected at ${id}`);
+    }
+    visiting.add(id);
+    for (const childId of childrenByParent[id] || []) {
+      visit(childId);
+    }
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of Object.keys(byId)) {
+    visit(id);
+  }
+
+  for (const page of pages) {
+    if (!page || typeof page.rootElementId !== "string" || !byId[page.rootElementId]) {
+      throw new GraphError(`Dangling page root ${page?.rootElementId ?? "(missing)"}`);
+    }
+  }
+}
+
 export class FlatStore {
   private state: FlatStoreState;
 
   constructor() {
-    this.state = {
-      byId: new Map(),
-      childrenByParent: new Map(),
-      parentByChild: new Map(),
-      pages: [],
-      activePageId: ""
-    };
+    this.state = emptyState();
   }
 
-  /**
-   * 注册或更新元素
-   */
   public setElement(el: FEElement): void {
     this.state.byId.set(el.id, el);
   }
 
-  /**
-   * 获取单个元素
-   */
   public getElement(id: string): FEElement | undefined {
     return this.state.byId.get(id);
   }
 
-  /**
-   * 获取父级元素
-   */
   public getParent(id: string): FEElement | undefined {
     const parentId = this.state.parentByChild.get(id);
     return parentId ? this.state.byId.get(parentId) : undefined;
   }
 
-  /**
-   * 获取直接子节点列表
-   */
   public getChildren(id: string): FEElement[] {
     const childIds = this.state.childrenByParent.get(id) ?? [];
     return childIds.map((cid) => this.state.byId.get(cid)).filter(Boolean) as FEElement[];
   }
 
-  /**
-   * 建立父子关联
-   */
   public attachChild(parentId: string, childId: string, index?: number): void {
+    if (!this.state.byId.has(parentId)) {
+      throw new GraphError(`Parent not found: ${parentId}`);
+    }
+    if (!this.state.byId.has(childId)) {
+      throw new GraphError(`Child not found: ${childId}`);
+    }
     if (parentId === childId) {
       throw new Error(`Cannot attach element to itself: ${parentId}`);
     }
@@ -102,7 +171,6 @@ export class FlatStore {
       throw new Error(`Cycle detected: cannot attach ancestor ${childId} as child of descendant ${parentId}`);
     }
 
-    // 先从原有父级脱离
     const currentParentId = this.state.parentByChild.get(childId);
     if (currentParentId) {
       const oldSiblings = this.state.childrenByParent.get(currentParentId) ?? [];
@@ -122,9 +190,6 @@ export class FlatStore {
     this.state.parentByChild.set(childId, parentId);
   }
 
-  /**
-   * 检查 targetId 是否为 ancestorId 的后代节点（或自身）
-   */
   public isDescendant(ancestorId: string, targetId: string): boolean {
     if (ancestorId === targetId) return true;
 
@@ -144,9 +209,6 @@ export class FlatStore {
     return false;
   }
 
-  /**
-   * 移动节点层级并附带循环引用安全校验
-   */
   public moveElement(elementId: string, newParentId: string, index?: number): boolean {
     if (!this.state.byId.has(elementId)) {
       throw new Error(`Element not found: ${elementId}`);
@@ -167,9 +229,6 @@ export class FlatStore {
     return true;
   }
 
-  /**
-   * 深度克隆以 rootId 为根的整棵子树，自动重新生成 UUID
-   */
   public cloneSubtree(
     rootId: string,
     idGenerator: (oldId: string) => string = () => createId()
@@ -179,7 +238,6 @@ export class FlatStore {
       throw new Error(`Subtree root element not found: ${rootId}`);
     }
 
-    // 建立 ID 映射表
     const idMap = new Map<string, string>();
     for (const el of originalSubtree) {
       idMap.set(el.id, idGenerator(el.id));
@@ -187,13 +245,12 @@ export class FlatStore {
 
     const clonedElements: FEElement[] = [];
 
-    // 克隆元素节点本体
     for (const el of originalSubtree) {
       const newId = idMap.get(el.id)!;
       const cloned: FEElement = {
         ...el,
         id: newId,
-        props: JSON.parse(JSON.stringify(el.props)),
+        props: structuredClone(el.props),
         canvasRect: el.canvasRect ? { ...el.canvasRect } : undefined,
         sourceLocation: el.sourceLocation ? { ...el.sourceLocation } : undefined
       };
@@ -201,7 +258,6 @@ export class FlatStore {
       clonedElements.push(cloned);
     }
 
-    // 建立克隆后的层级关系
     for (const el of originalSubtree) {
       const newId = idMap.get(el.id)!;
       const originalChildren = this.state.childrenByParent.get(el.id) ?? [];
@@ -224,9 +280,6 @@ export class FlatStore {
     };
   }
 
-  /**
-   * 移除元素及其在关系表中的关联
-   */
   public removeElement(id: string): void {
     const parentId = this.state.parentByChild.get(id);
     if (parentId) {
@@ -240,24 +293,34 @@ export class FlatStore {
       this.state.parentByChild.delete(id);
     }
 
-    // 递归移除子项
-    const children = this.state.childrenByParent.get(id) ?? [];
+    const children = [...(this.state.childrenByParent.get(id) ?? [])];
     for (const childId of children) {
       this.removeElement(childId);
     }
     this.state.childrenByParent.delete(id);
     this.state.byId.delete(id);
+    this.dropPagesForMissingRoots();
   }
 
-  /**
-   * 广度优先提取以 rootId 为根的整棵子树
-   */
+  private dropPagesForMissingRoots(): void {
+    const remaining = this.state.pages.filter((page) => this.state.byId.has(page.rootElementId));
+    this.state.pages = remaining;
+    if (!remaining.some((page) => page.id === this.state.activePageId)) {
+      this.state.activePageId = remaining[0]?.id ?? "";
+    }
+  }
+
   public getSubtree(rootId: string): FEElement[] {
     const result: FEElement[] = [];
     const queue = [rootId];
+    const visited = new Set<string>();
 
     while (queue.length > 0) {
       const currentId = queue.shift()!;
+      if (visited.has(currentId)) {
+        throw new GraphError(`Cycle detected at ${currentId}`);
+      }
+      visited.add(currentId);
       const el = this.state.byId.get(currentId);
       if (!el) continue;
       result.push(el);
@@ -268,9 +331,6 @@ export class FlatStore {
     return result;
   }
 
-  /**
-   * 获取所有无父级的顶层根节点 ID
-   */
   public getRootIds(): string[] {
     const rootIds: string[] = [];
     for (const id of this.state.byId.keys()) {
@@ -281,18 +341,18 @@ export class FlatStore {
     return rootIds;
   }
 
-  /**
-   * 画布页面管理
-   */
   public addPage(page: PageMeta): void {
-    this.state.pages.push(page);
+    if (!this.state.byId.has(page.rootElementId)) {
+      throw new GraphError(`Dangling page root ${page.rootElementId}`);
+    }
+    this.state.pages.push({ ...page });
     if (!this.state.activePageId) {
       this.state.activePageId = page.id;
     }
   }
 
   public getPages(): PageMeta[] {
-    return this.state.pages;
+    return this.state.pages.map((page) => ({ ...page }));
   }
 
   public setActivePage(pageId: string): void {
@@ -303,27 +363,27 @@ export class FlatStore {
     return this.state.activePageId;
   }
 
-  /**
-   * 导出为 JSON 序列化对象（用于本地 .designer/canvas.json 存储）
-   */
-  public toJSON() {
-    return {
+  public toJSON(): FlatStoreJson {
+    return structuredClone({
       byId: Object.fromEntries(this.state.byId),
       childrenByParent: Object.fromEntries(this.state.childrenByParent),
       parentByChild: Object.fromEntries(this.state.parentByChild),
       pages: this.state.pages,
       activePageId: this.state.activePageId
-    };
+    });
   }
 
-  /**
-   * 从 JSON 反序列化恢复 Store
-   */
-  public fromJSON(data: any) {
-    this.state.byId = new Map(Object.entries(data.byId || {}));
-    this.state.childrenByParent = new Map(Object.entries(data.childrenByParent || {}));
-    this.state.parentByChild = new Map(Object.entries(data.parentByChild || {}));
-    this.state.pages = data.pages || [];
-    this.state.activePageId = data.activePageId || "";
+  public fromJSON(data: unknown): void {
+    const cloned = structuredClone(data ?? {}) as FlatStoreJson;
+    if (!cloned.byId) cloned.byId = {};
+    if (!cloned.childrenByParent) cloned.childrenByParent = {};
+    if (!cloned.parentByChild) cloned.parentByChild = {};
+    if (!cloned.pages) cloned.pages = [];
+    assertValidGraph(cloned);
+    this.state.byId = new Map(Object.entries(cloned.byId));
+    this.state.childrenByParent = new Map(Object.entries(cloned.childrenByParent));
+    this.state.parentByChild = new Map(Object.entries(cloned.parentByChild));
+    this.state.pages = cloned.pages;
+    this.state.activePageId = cloned.activePageId || "";
   }
 }

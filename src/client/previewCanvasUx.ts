@@ -28,8 +28,10 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 export function applyRectsToDom(canvasEl: HTMLElement, panel: CanvasPanel, store: FlatStore): void {
+  const iframe = canvasEl.querySelector("iframe.od-sandbox-frame") as HTMLIFrameElement | null;
+  const scope: ParentNode = iframe?.contentDocument?.body ?? canvasEl;
   for (const [id, rect] of panel.getAllElementRects()) {
-    const node = canvasEl.querySelector(`[data-element-id="${CSS.escape(id)}"]`) as HTMLElement | null;
+    const node = scope.querySelector(`[data-element-id="${CSS.escape(id)}"]`) as HTMLElement | null;
     if (!node) continue;
     const parent = store.getParent(id);
     const parentRect = parent?.canvasRect;

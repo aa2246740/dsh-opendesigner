@@ -1,9 +1,3 @@
-/**
- * 组件沙箱渲染容器 (Component Sandbox Container)
- * 深度集成 next-shims 模拟 Next.js 与 React 19 运行时环境
- * 提供安全错误边界隔离与虚拟 DOM / 静态 HTML 预览生成
- */
-
 import type { CanvasRect, FlatStore } from "../store/flatStore.ts";
 import * as NextShims from "./next-shims/index.ts";
 
@@ -16,8 +10,139 @@ export interface SandboxRenderOptions {
 
 export interface RenderedNode {
   tag: string;
-  props: Record<string, any>;
+  props: Record<string, unknown>;
   children: (RenderedNode | string)[];
+}
+
+export const SANDBOX_CSP =
+  "default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'";
+
+const ALLOWED_TAGS = new Set([
+  "a",
+  "abbr",
+  "article",
+  "aside",
+  "b",
+  "blockquote",
+  "br",
+  "button",
+  "caption",
+  "code",
+  "div",
+  "em",
+  "figcaption",
+  "figure",
+  "footer",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hr",
+  "i",
+  "img",
+  "input",
+  "label",
+  "li",
+  "main",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "section",
+  "span",
+  "strong",
+  "table",
+  "tbody",
+  "td",
+  "textarea",
+  "tfoot",
+  "th",
+  "thead",
+  "tr",
+  "ul",
+  "svg",
+  "path",
+  "circle",
+  "rect",
+  "g",
+  "line",
+  "polyline",
+  "polygon"
+]);
+
+const ALLOWED_ATTRS = new Set([
+  "alt",
+  "class",
+  "className",
+  "colspan",
+  "disabled",
+  "fill",
+  "for",
+  "height",
+  "href",
+  "id",
+  "name",
+  "placeholder",
+  "rel",
+  "role",
+  "rowspan",
+  "src",
+  "stroke",
+  "stroke-width",
+  "style",
+  "target",
+  "title",
+  "type",
+  "value",
+  "viewBox",
+  "width",
+  "xmlns",
+  "d",
+  "cx",
+  "cy",
+  "r",
+  "x",
+  "y",
+  "x1",
+  "x2",
+  "y1",
+  "y2"
+]);
+
+function isAllowedAttr(name: string): boolean {
+  if (name.startsWith("on")) return false;
+  if (name.startsWith("data-")) return true;
+  if (name.startsWith("aria-")) return true;
+  return ALLOWED_ATTRS.has(name);
+}
+
+function isAllowedUrl(value: string): boolean {
+  const trimmed = value.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("javascript:")) return false;
+  if (lower.startsWith("vbscript:")) return false;
+  if (lower.startsWith("data:text/html")) return false;
+  if (lower.startsWith("data:image/")) return true;
+  if (lower.startsWith("https:")) return true;
+  if (lower.startsWith("http:")) return true;
+  if (lower.startsWith("mailto:")) return true;
+  if (trimmed.startsWith("/") || trimmed.startsWith("#") || trimmed.startsWith(".")) return true;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return true;
+  return false;
+}
+
+export function wrapSandboxSrcdoc(inner: string): string {
+  return `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"></head><body style="margin:0;background:transparent;">${inner}</body></html>`;
+}
+
+export function sandboxIframeMarkup(inner: string): string {
+  const srcdoc = wrapSandboxSrcdoc(inner)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;");
+  return `<iframe class="od-sandbox-frame" data-testid="component-sandbox" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${srcdoc}" style="border:0;width:100%;height:100%;pointer-events:none;background:transparent;position:absolute;inset:0;"></iframe>`;
 }
 
 export class ComponentSandbox {
@@ -39,9 +164,6 @@ export class ComponentSandbox {
     return this.nextShims;
   }
 
-  /**
-   * 将 FlatStore 节点递归渲染为安全虚拟 DOM 结构
-   */
   public renderElement(store: FlatStore, elementId: string, parentRect?: CanvasRect): RenderedNode | string {
     const el = store.getElement(elementId);
     if (!el) return "";
@@ -61,31 +183,29 @@ export class ComponentSandbox {
       renderedChildren.push(this.renderElement(store, child.id, el.canvasRect));
     }
 
-    // 针对 Next.js 常见组件做 Shim 处理
     let finalTag = el.tag;
-    const finalProps: Record<string, any> = { ...(el.props || {}) };
+    const finalProps: Record<string, unknown> = { ...(el.props || {}) };
 
     if (el.tag === "Image" || el.tag === "next/image") {
       const shim = this.nextShims.Image({
-        src: finalProps.src || "/placeholder.svg",
-        alt: finalProps.alt || "",
-        width: finalProps.width,
-        height: finalProps.height,
-        fill: finalProps.fill,
-        className: finalProps.className
+        src: (finalProps.src as string | { src: string }) || "/placeholder.svg",
+        alt: String(finalProps.alt || ""),
+        width: finalProps.width as number | string | undefined,
+        height: finalProps.height as number | string | undefined,
+        fill: Boolean(finalProps.fill),
+        className: finalProps.className as string | undefined
       });
       finalTag = shim.type;
       Object.assign(finalProps, shim.props, { "data-next-image": "true" });
     } else if (el.tag === "Link" || el.tag === "next/link") {
       const shim = this.nextShims.Link({
-        href: finalProps.href || "#",
-        className: finalProps.className
+        href: String(finalProps.href || "#"),
+        className: finalProps.className as string | undefined
       });
       finalTag = shim.type;
       Object.assign(finalProps, shim.props, { "data-next-link": "true" });
     }
 
-    // 注入 data-element-id 用于画布视口选中与悬停关联
     if (!finalProps["data-element-id"]) {
       finalProps["data-element-id"] = el.id;
     }
@@ -104,11 +224,8 @@ export class ComponentSandbox {
     };
   }
 
-  /**
-   * Map world canvasRect onto a positioned node. Nested children use parent-relative left/top.
-   */
   private applyCanvasRectStyle(
-    props: Record<string, any>,
+    props: Record<string, unknown>,
     rect: CanvasRect,
     parentRect?: CanvasRect
   ): void {
@@ -124,7 +241,7 @@ export class ComponentSandbox {
     };
 
     if (props.style && typeof props.style === "object" && !Array.isArray(props.style)) {
-      props.style = { ...layout, ...props.style };
+      props.style = { ...layout, ...(props.style as Record<string, unknown>) };
       return;
     }
     if (typeof props.style === "string" && props.style.trim()) {
@@ -137,15 +254,12 @@ export class ComponentSandbox {
     props.style = layout;
   }
 
-  /**
-   * 将虚拟渲染节点转换为 HTML 字符串（可直接注入 iframe 或 shadow DOM）
-   */
   public renderToHtml(store: FlatStore, rootId: string): string {
     try {
       const node = this.renderElement(store, rootId);
       return this.nodeToHtmlString(node);
-    } catch (err: any) {
-      return this.renderErrorFallback(err);
+    } catch (err: unknown) {
+      return this.renderErrorFallback(err instanceof Error ? err : new Error(String(err)));
     }
   }
 
@@ -155,22 +269,26 @@ export class ComponentSandbox {
     }
 
     const { tag, props, children } = node;
-    const safeTag = /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tag) ? tag : "div";
+    const rawTag = /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tag) ? tag : "div";
+    const safeTag = ALLOWED_TAGS.has(rawTag.toLowerCase()) ? rawTag : "div";
     const attrs = Object.entries(props)
       .map(([k, v]) => {
         if (typeof v === "function") return "";
         if (k === "children") return "";
+        if (!isAllowedAttr(k)) return "";
         const attrName = k === "className" ? "class" : k;
         if (k === "style" && typeof v === "object" && v !== null) {
-          const css = Object.entries(v)
+          const css = Object.entries(v as Record<string, unknown>)
             .map(([sk, sv]) => `${sk.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}:${sv}`)
             .join(";");
           return `style="${this.escapeHtml(css)}"`;
         }
-        if (typeof v === "string") return `${attrName}="${this.escapeHtml(v)}"`;
         if (typeof v === "boolean") return v ? attrName : "";
-        if (typeof v === "number") return `${attrName}="${v}"`;
-        return `${attrName}="${this.escapeHtml(JSON.stringify(v))}"`;
+        let text = typeof v === "string" ? v : typeof v === "number" ? String(v) : JSON.stringify(v);
+        if ((attrName === "href" || attrName === "src" || attrName === "xlink:href") && !isAllowedUrl(text)) {
+          return "";
+        }
+        return `${attrName}="${this.escapeHtml(text)}"`;
       })
       .filter(Boolean)
       .join(" ");
@@ -195,13 +313,10 @@ export class ComponentSandbox {
       .replace(/'/g, "&#039;");
   }
 
-  /**
-   * 优雅错误边界回退渲染
-   */
   private renderErrorFallback(error: Error): string {
     return `
       <div style="padding: 16px; border: 1px solid #ef4444; background: #fef2f2; color: #991b1b; border-radius: 8px; font-family: sans-serif;">
-        <div style="font-weight: bold; margin-bottom: 4px;">⚠️ 沙箱渲染隔离保护</div>
+        <div style="font-weight: bold; margin-bottom: 4px;">Sandbox render isolation</div>
         <div style="font-size: 13px;">${this.escapeHtml(error.message || String(error))}</div>
       </div>
     `.trim();

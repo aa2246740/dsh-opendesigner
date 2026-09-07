@@ -142,7 +142,7 @@ describe("Persistence - checkpoints, autosave, apply", () => {
     assert.equal(denied.success, false);
     assert.equal(denied.code, "APPROVAL_REQUIRED");
 
-    const approved = await gated.executeTool("apply_to_project", { approve: true });
+    const approved = await gated.executeTool("apply_to_project", { approve: true }, { approvalChannel: "host" });
     assert.equal(approved.success, true);
     assert.equal(approved.gitCommit, false);
     const stamp = JSON.parse(await fs.readFile(path.join(dir, ".designer/applied.json"), "utf-8"));
@@ -205,7 +205,7 @@ describe("Persistence - agent batch worktrees", () => {
       path: "src/agent-batch-demo.txt",
       content: "from-worktree\n",
       approve: true
-    });
+    }, { approvalChannel: "host" });
     assert.equal(write.success, true);
     const inWorktree = await fs.readFile(path.join(worktreeAbs, "src/agent-batch-demo.txt"), "utf-8");
     assert.equal(inWorktree, "from-worktree\n");
@@ -236,10 +236,10 @@ describe("Persistence - agent batch worktrees", () => {
       path: "src/agent-batch-demo.txt",
       content: "applied\n",
       approve: true
-    });
+    }, { approvalChannel: "host" });
     assert.equal(write2.success, true);
 
-    const applied = await service.executeTool("batch_apply", { batchId: batchId2, approve: true });
+    const applied = await service.executeTool("batch_apply", { batchId: batchId2, approve: true }, { approvalChannel: "host" });
     assert.equal(applied.success, true);
     assert.ok(applied.copied.includes("src/agent-batch-demo.txt"));
     const mainCopy = await fs.readFile(path.join(gitDir, "src/agent-batch-demo.txt"), "utf-8");
@@ -247,5 +247,89 @@ describe("Persistence - agent batch worktrees", () => {
 
     const { stdout: log } = await git(gitDir, ["log", "--oneline"]);
     assert.equal(log.trim().split("\n").length, 1);
+  });
+
+  it("rejects batch create when the project is dirty (OD-01/R08)", async () => {
+    await initGitRepo(gitDir);
+    await fs.mkdir(path.join(gitDir, "src"), { recursive: true });
+    await fs.writeFile(path.join(gitDir, "src/app.tsx"), "base\n");
+    await git(gitDir, ["add", "src/app.tsx"]);
+    await git(gitDir, ["-c", "user.email=od@test", "-c", "user.name=OpenDesigner", "commit", "-m", "app"]);
+    await fs.writeFile(path.join(gitDir, "src/app.tsx"), "dirty\n");
+    const service = new OpenDesignerService({ projectRoot: gitDir, autoApprove: true });
+    const created = await service.executeTool("batch_create", { label: "dirty" });
+    assert.equal(created.success, false);
+    assert.equal(created.code, "DIRTY_WORKTREE");
+  });
+});
+
+describe("Persistence - source undo (OD-04)", () => {
+  const dir = path.join(ROOT, "source-undo");
+
+  after(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("removes created files and restores deleted files on rewind", async () => {
+    await emptyDir(dir);
+    const service = new OpenDesignerService({ projectRoot: dir, autoApprove: true });
+    await service.init();
+    await fs.mkdir(path.join(dir, "src"), { recursive: true });
+    await fs.writeFile(path.join(dir, "src/keep.tsx"), "keep-v1\n");
+    const baseline = await service.executeTool("checkpoint", { label: "pre-source" });
+
+    const created = await service.executeTool("project_write", {
+      path: "src/new.tsx",
+      content: "created\n"
+    });
+    assert.equal(created.success, true);
+    const deleted = await service.executeTool("project_delete", { path: "src/keep.tsx" });
+    assert.equal(deleted.success, true);
+
+    const rewind = await service.executeTool("rewind", { checkpointId: baseline.checkpoint.id });
+    assert.equal(rewind.success, true);
+    const createdExists = await fs
+      .stat(path.join(dir, "src/new.tsx"))
+      .then(() => true)
+      .catch(() => false);
+    assert.equal(createdExists, false);
+    assert.equal(await fs.readFile(path.join(dir, "src/keep.tsx"), "utf-8"), "keep-v1\n");
+  });
+});
+
+describe("Persistence - project runtime (OD-07)", () => {
+  const dir = path.join(ROOT, "runtime");
+
+  after(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("refuses a stale whole-canvas hydrate", async () => {
+    await emptyDir(dir);
+    const service = new OpenDesignerService({ projectRoot: dir, autoApprove: true });
+    await service.init();
+    service.store.setElement({
+      id: "hero",
+      type: "element",
+      tag: "div",
+      props: { className: "agent" }
+    });
+    service.bumpStoreVersion();
+    const stale = {
+      ...service.store.toJSON(),
+      projectId: service.projectId,
+      version: 0,
+      baseVersion: 0,
+      byId: {
+        hero: {
+          id: "hero",
+          type: "element",
+          tag: "div",
+          props: { className: "stale-preview" }
+        }
+      }
+    };
+    assert.throws(() => service.hydrateStore(stale));
+    assert.equal(service.store.getElement("hero")?.props.className, "agent");
   });
 });

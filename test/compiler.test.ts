@@ -59,6 +59,24 @@ describe("Compiler - Tailwind Token Merge", () => {
     assert.ok(res2.includes("bg-blue-500"), "bg-blue-500 must be present");
     assert.ok(!res2.includes("bg-red-500"), "bg-red-500 must be removed");
   });
+
+  it("keeps shrink-0 when adding grow", () => {
+    const res = mergeTailwindTokens("flex shrink-0 w-8", "grow");
+    assert.match(res, /\bshrink-0\b/);
+    assert.match(res, /\bgrow\b/);
+  });
+
+  it("keeps independent corner radii", () => {
+    const res = mergeTailwindTokens("rounded-tl-md", "rounded-tr-xl");
+    assert.match(res, /\brounded-tl-md\b/);
+    assert.match(res, /\brounded-tr-xl\b/);
+  });
+
+  it("keeps left border color when setting right border color", () => {
+    const res = mergeTailwindTokens("border-l-red-500", "border-r-blue-500");
+    assert.match(res, /\bborder-l-red-500\b/);
+    assert.match(res, /\bborder-r-blue-500\b/);
+  });
 });
 
 describe("Compiler - Deterministic Source Editing", () => {
