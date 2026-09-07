@@ -252,10 +252,12 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     assert.equal(delRes.success, true);
     assert.equal(service.store.getElement(childId), undefined);
 
-    // Verify and release
-    await service.executeTool("take_screenshot", { elementId: parentId });
+    const shotRes = await service.executeTool("take_screenshot", { elementId: parentId });
+    assert.equal(shotRes.success, true);
+    assert.equal(shotRes.visualProof, false);
     const relRes = await service.executeTool("canvas_release", { claim_id: parentClaim.claimId });
-    assert.equal(relRes.success, true);
+    assert.equal(relRes.success, false);
+    assert.ok(String(relRes.error || "").includes("VERIFICATION_REQUIRED"));
   });
 
   it("should reject canvas_edit when old_string is not found in element", async () => {

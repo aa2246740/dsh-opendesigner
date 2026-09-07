@@ -18,7 +18,8 @@ function tagName(node: { name?: { type?: string; name?: string; property?: { nam
 
 function literalClassName(opening: {
   attributes?: Array<{ type?: string; name?: { name?: string }; value?: { type?: string; value?: string } }>;
-}): string {
+} | null | undefined): string {
+  if (!opening) return "";
   const attr = (opening.attributes || []).find(
     (item) => item.type === "JSXAttribute" && item.name?.name === "className"
   );
@@ -140,7 +141,11 @@ export function importJsxToElements(source: string, filePath: string): ImportedJ
       for (const child of jsxChildren(node)) walk(child, parentId, expanding);
       return;
     }
-    const opening = node.openingElement as { name?: { type?: string; name?: string }; loc?: { start?: { line: number; column: number } } };
+    const opening = node.openingElement as {
+      name?: { type?: string; name?: string };
+      loc?: { start?: { line: number; column: number } };
+      attributes?: Array<{ type?: string; name?: { name?: string }; value?: { type?: string; value?: string } }>;
+    };
     const loc = opening?.loc?.start;
     if (!loc) return;
     const tag = tagName(opening);

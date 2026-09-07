@@ -10,46 +10,131 @@ const { wrapSandboxSrcdoc, CANVAS_TRUSTED_CSS } = await loadSrc("client/sandbox.
 
 const PROBE_CSS = `.probe{background-color:rgb(16, 185, 129);border-radius:12px;box-shadow:rgb(0, 0, 0) 0px 8px 16px 0px;width:80px;height:40px;}`;
 
-function chromeDump(url, userDataDir) {
+function waitFor(stream, regex, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(
-      "google-chrome",
-      [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--disable-extensions",
-        "--no-first-run",
-        `--user-data-dir=${userDataDir}`,
-        "--virtual-time-budget=2000",
-        "--timeout=10000",
-        "--dump-dom",
-        url
-      ],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
-    let out = "";
-    let err = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGKILL");
-      reject(new Error(`chrome timed out: ${err.slice(-400)}`));
-    }, 15000);
-    proc.stdout.on("data", (chunk) => {
-      out += chunk;
+    let buf = "";
+    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${regex}: ${buf.slice(-400)}`)), timeoutMs);
+    const onData = (chunk) => {
+      buf += chunk;
+      const match = buf.match(regex);
+      if (match) {
+        clearTimeout(timer);
+        stream.off("data", onData);
+        resolve(match);
+      }
+    };
+    stream.on("data", onData);
+  });
+}
+
+function cdpSession(wsUrl) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    let nextId = 0;
+    const pending = new Map();
+    ws.addEventListener("open", () => {
+      resolve({
+        send(method, params = {}) {
+          const id = ++nextId;
+          return new Promise((res, rej) => {
+            pending.set(id, { res, rej });
+            ws.send(JSON.stringify({ id, method, params }));
+          });
+        },
+        close() {
+          ws.close();
+        }
+      });
     });
-    proc.stderr.on("data", (chunk) => {
-      err += chunk;
-    });
-    proc.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, out, err });
+    ws.addEventListener("error", reject);
+    ws.addEventListener("message", (event) => {
+      const msg = JSON.parse(String(event.data));
+      if (!msg.id || !pending.has(msg.id)) return;
+      const { res, rej } = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) rej(new Error(msg.error.message || JSON.stringify(msg.error)));
+      else res(msg.result);
     });
   });
+}
+
+async function chromeComputedStyle(url, userDataDir) {
+  const proc = spawn(
+    "google-chrome",
+    [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--disable-extensions",
+      "--no-first-run",
+      `--user-data-dir=${userDataDir}`,
+      "--remote-debugging-port=0",
+      url
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] }
+  );
+  try {
+    const match = await waitFor(proc.stderr, /DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/[^\s]+)/, 10000);
+    const browserWs = match[1];
+    const port = new URL(browserWs).port;
+    let pageWs;
+    for (let i = 0; i < 40; i += 1) {
+      const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((res) => res.json());
+      const page = targets.find(
+        (row) =>
+          row.type === "page" &&
+          row.webSocketDebuggerUrl &&
+          typeof row.url === "string" &&
+          row.url.includes("127.0.0.1") &&
+          row.url !== "about:blank"
+      );
+      if (page) {
+        pageWs = page.webSocketDebuggerUrl;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!pageWs) throw new Error("chrome page target not found");
+    const session = await cdpSession(pageWs);
+    try {
+      await session.send("Page.enable");
+      await session.send("Runtime.enable");
+      let dumped;
+      for (let i = 0; i < 20; i += 1) {
+        try {
+          const evaluated = await session.send("Runtime.evaluate", {
+            expression: `new Promise((resolve) => {
+              const check = () => {
+                const title = document.title;
+                if (title === "CSS_IFRAME_PASS" || title === "CSS_IFRAME_FAIL") {
+                  resolve({
+                    title,
+                    result: document.getElementById("result")?.textContent || ""
+                  });
+                  return;
+                }
+                setTimeout(check, 50);
+              };
+              check();
+            })`,
+            awaitPromise: true,
+            returnByValue: true
+          });
+          dumped = evaluated.result.value;
+          break;
+        } catch (err) {
+          if (!String(err).includes("Execution context was destroyed") || i === 19) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      return dumped;
+    } finally {
+      session.close();
+    }
+  } finally {
+    proc.kill("SIGKILL");
+  }
 }
 
 describe("CSS iframe fixture", () => {
@@ -88,8 +173,12 @@ function report() {
   });
 }
 const frame = document.getElementById("sandbox");
-if (frame.contentDocument && frame.contentDocument.readyState === "complete") report();
-else frame.addEventListener("load", report);
+function wait() {
+  const childDoc = frame.contentDocument;
+  if (childDoc && childDoc.getElementById("child-probe")) report();
+  else setTimeout(wait, 20);
+}
+wait();
 </script>
 </body></html>`;
 
@@ -106,12 +195,12 @@ else frame.addEventListener("load", report);
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const { port } = server.address();
     try {
-      const dumped = await chromeDump(`http://127.0.0.1:${port}/`, userData);
-      assert.match(dumped.out, /CSS_IFRAME_PASS/);
-      assert.match(dumped.out, /"sheets":[1-9]/);
+      const dumped = await chromeComputedStyle(`http://127.0.0.1:${port}/`, userData);
+      assert.equal(dumped.title, "CSS_IFRAME_PASS", dumped.result);
+      assert.match(dumped.result, /"sheets":[1-9]/);
     } finally {
       server.close();
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
