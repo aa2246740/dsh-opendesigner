@@ -9,11 +9,12 @@ import {
   contentHash,
   presenceEqual,
   readPresence,
-  unlinkNoFollow,
-  writeFileNoFollow
+  managedReplace,
+  managedUnlink
 } from "./fileBytes.ts";
 import { ApplyJournal, type ApplyJournalOp } from "./applyJournal.ts";
 import {
+  cloneFrozenChangeset,
   fileModeOf,
   fingerprintPresence,
   hashFrozenChangeset,
@@ -194,7 +195,8 @@ export class AgentBatchRegistry {
   private filePath: string;
   private workspaceId: string;
   private journal: ApplyJournal;
-  private pinned = new Map<string, FrozenChangeset>();
+  private writeChain: Promise<unknown> = Promise.resolve();
+  public beforeManagedWrite?: (abs: string) => Promise<void>;
 
   constructor(projectRoot: string, filePath: string, workspaceId?: string) {
     this.projectRoot = projectRoot;
@@ -316,8 +318,7 @@ export class AgentBatchRegistry {
       ops,
       afterBytes
     };
-    this.pinned.set(batchId, frozen);
-    return frozen;
+    return cloneFrozenChangeset(frozen);
   }
 
   public async prepareApply(batchId: string): Promise<FrozenChangeset> {
@@ -329,6 +330,29 @@ export class AgentBatchRegistry {
   }
 
   public async commitPrepared(frozen: FrozenChangeset): Promise<BatchApplyResult> {
+    return this.enqueueWrite(() => this.commitPreparedInner(frozen));
+  }
+
+  public async apply(batchId: string): Promise<BatchApplyResult> {
+    return this.enqueueWrite(async () => {
+      await this.journal.recover();
+      this.requireOpen(batchId);
+      const frozen = await this.captureFrozen(batchId);
+      await this.assertFrozenConflicts(batchId, frozen);
+      return await this.commitPreparedInner(frozen);
+    });
+  }
+
+  private enqueueWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeChain.then(fn, fn);
+    this.writeChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async commitPreparedInner(frozen: FrozenChangeset): Promise<BatchApplyResult> {
     const batch = this.requireOpen(frozen.batchId);
     const copied: string[] = [];
     const deleted: string[] = [];
@@ -365,27 +389,47 @@ export class AgentBatchRegistry {
           afterHash: op.afterHash
         });
 
-        if (op.kind === "delete") {
-          await unlinkNoFollow(to);
-          deleted.push(op.rel);
-          continue;
+        if (this.beforeManagedWrite) {
+          await this.beforeManagedWrite(to);
         }
-        const bytes = frozen.afterBytes[op.rel];
-        if (!bytes) {
-          throw new BatchError(`Frozen candidate missing for ${op.rel}`, "APPLY_FAILED");
+
+        try {
+          if (op.kind === "delete") {
+            await managedUnlink(to, op.beforeHash);
+            deleted.push(op.rel);
+            continue;
+          }
+          const bytes = frozen.afterBytes[op.rel];
+          if (!bytes) {
+            throw new BatchError(`Frozen candidate missing for ${op.rel}`, "APPLY_FAILED");
+          }
+          const pinnedBytes = Buffer.from(bytes);
+          if (op.afterHash && contentHash(pinnedBytes) !== op.afterHash) {
+            throw new BatchError(`Frozen candidate hash mismatch for ${op.rel}`, "APPLY_FAILED");
+          }
+          await managedReplace(to, op.beforeHash, pinnedBytes);
+          if (typeof op.mode === "number") {
+            await fs.chmod(to, op.mode);
+          }
+          copied.push(op.rel);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message.startsWith("BATCH_CONFLICT:")) {
+            throw new BatchError(
+              `Refusing apply: ${op.rel} changed after preflight (expected-before mismatch)`,
+              "BATCH_CONFLICT"
+            );
+          }
+          throw err;
         }
-        const pinned = Buffer.from(bytes);
-        if (op.afterHash && contentHash(pinned) !== op.afterHash) {
-          throw new BatchError(`Frozen candidate hash mismatch for ${op.rel}`, "APPLY_FAILED");
-        }
-        await writeFileNoFollow(to, pinned);
-        if (typeof op.mode === "number") {
-          await fs.chmod(to, op.mode);
-        }
-        copied.push(op.rel);
       }
     } catch (err) {
-      await this.journal.recover();
+      try {
+        await this.journal.recover();
+      } catch (recErr) {
+        if (err instanceof BatchError && err.code === "BATCH_CONFLICT") throw err;
+        throw recErr;
+      }
       throw err;
     }
 
@@ -393,17 +437,8 @@ export class AgentBatchRegistry {
     await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
     await this.removeWorktree(batch);
     batch.status = "applied";
-    this.pinned.delete(frozen.batchId);
     await this.persist();
     return { batchId: frozen.batchId, status: batch.status, copied, deleted };
-  }
-
-  public async apply(batchId: string): Promise<BatchApplyResult> {
-    await this.journal.recover();
-    this.requireOpen(batchId);
-    const frozen = this.pinned.get(batchId) ?? (await this.captureFrozen(batchId));
-    await this.assertFrozenConflicts(batchId, frozen);
-    return await this.commitPrepared(frozen);
   }
 
   private async assertFrozenConflicts(batchId: string, frozen: FrozenChangeset): Promise<void> {

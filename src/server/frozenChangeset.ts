@@ -69,3 +69,24 @@ export function hashFrozenChangeset(changeset: FrozenChangeset): string {
   }
   return hash.digest("hex");
 }
+
+export function cloneFrozenChangeset(changeset: FrozenChangeset): FrozenChangeset {
+  const afterBytes: Record<string, Buffer> = {};
+  for (const [rel, buf] of Object.entries(changeset.afterBytes)) {
+    afterBytes[rel] = Buffer.from(buf);
+  }
+  return {
+    projectId: changeset.projectId,
+    worktreeRelPath: changeset.worktreeRelPath,
+    batchId: changeset.batchId,
+    baseVersion: changeset.baseVersion,
+    ops: changeset.ops.map((op) => ({
+      kind: op.kind,
+      rel: op.rel,
+      mode: op.mode,
+      beforeHash: op.beforeHash,
+      afterHash: op.afterHash
+    })),
+    afterBytes
+  };
+}

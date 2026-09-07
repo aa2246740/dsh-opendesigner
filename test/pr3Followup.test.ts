@@ -133,21 +133,27 @@ describe("PR3-05 rewind after accept", () => {
 });
 
 describe("PR3-11 apply journal recovery", () => {
-  it("restores files from a leftover applying journal", async () => {
+  it("blocks hashless leftover journals instead of restoring over unknown bytes", async () => {
     const dir = await tmp("pr3-journal-");
     await fs.mkdir(path.join(dir, "src"), { recursive: true });
     await fs.writeFile(path.join(dir, "src/first.txt"), "orig-first\n");
     const workspaceId = "testworkspace";
-    const journal = new ApplyJournal(dir, workspaceId, path.join(dir, ".designer", "apply-journal.json"));
+    const journalFile = path.join(dir, ".designer", "apply-journal.json");
+    const journal = new ApplyJournal(dir, workspaceId, journalFile);
     const staging = journal.stagingDir("batch1");
     await fs.mkdir(path.join(staging, "src"), { recursive: true });
     await writeFileNoFollow(path.join(staging, "src/first.txt"), "orig-first\n");
     const entry = await journal.begin("batch1", [{ kind: "write", rel: "src/first.txt" }]);
     await journal.recordBackup(entry, "src/first.txt", path.join(".designer", "apply-staging", "batch1", "src/first.txt"));
     await fs.writeFile(path.join(dir, "src/first.txt"), "partial-new\n");
-    const recovered = await journal.recover();
-    assert.equal(recovered.recovered, true);
-    assert.equal(await fs.readFile(path.join(dir, "src/first.txt"), "utf8"), "orig-first\n");
+    await assert.rejects(() => journal.recover(), (err: Error & { code?: string }) => {
+      assert.equal(err.name, "ApplyJournalBlockedError");
+      assert.equal(err.code, "BATCH_RECOVERY_BLOCKED");
+      return true;
+    });
+    assert.equal(await fs.readFile(path.join(dir, "src/first.txt"), "utf8"), "partial-new\n");
+    await fs.access(journalFile);
+    await fs.access(path.join(staging, "src/first.txt"));
     await fs.rm(dir, { recursive: true, force: true });
   });
 });

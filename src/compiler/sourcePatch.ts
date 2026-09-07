@@ -21,10 +21,12 @@ export interface SourcePatchProposal {
 
 export class SourcePatchError extends Error {
   readonly code: string;
-  constructor(message: string, code: string) {
+  readonly ruleMode?: string;
+  constructor(message: string, code: string, extras?: { ruleMode?: string }) {
     super(message);
     this.name = "SourcePatchError";
     this.code = code;
+    this.ruleMode = extras?.ruleMode;
   }
 }
 
@@ -35,7 +37,7 @@ export function hashSource(content: string | Buffer): string {
 export type ParsedIntent =
   | { kind: "merge"; tokens: string }
   | { kind: "dropCategory"; category: string }
-  | { kind: "unsupported"; reason: string };
+  | { kind: "unsupported"; reason: string; ruleMode?: "refuse" };
 
 function mentionsShadow(raw: string, lower: string): boolean {
   return /shadow/.test(lower) || /阴影/.test(raw);
@@ -43,6 +45,23 @@ function mentionsShadow(raw: string, lower: string): boolean {
 
 function isRemoval(raw: string, lower: string): boolean {
   return /不要|别改|禁止|去掉|删除|取消|移除|without|\bremove\b|\bdon't\b|\bdo not\b|\bno\b/.test(lower) || /不要/.test(raw);
+}
+
+function isNegatedDropShadow(raw: string, lower: string): boolean {
+  return (
+    /不要(去掉|删除|移除|取消)阴影/.test(raw) ||
+    /别(去掉|删除|移除)阴影/.test(raw) ||
+    /don'?t\s+(?:remove|drop|delete)\s+(?:the\s+)?shadow/.test(lower) ||
+    /do\s+not\s+(?:remove|drop|delete)\s+(?:the\s+)?shadow/.test(lower) ||
+    /keep\s+(?:the\s+)?shadow/.test(lower)
+  );
+}
+
+function isExplicitDropShadow(raw: string, lower: string): boolean {
+  return (
+    /只?(去掉|删除|移除|取消)阴影/.test(raw) ||
+    /(?:only\s+)?(?:remove|drop|delete)\s+(?:the\s+)?shadow/.test(lower)
+  );
 }
 
 export function parseIntent(instruction: string): ParsedIntent {
@@ -53,13 +72,28 @@ export function parseIntent(instruction: string): ParsedIntent {
   const shadow = mentionsShadow(raw, lower);
   const addShadow = (/加(上)?阴影/.test(raw) || /add(?:ing)?\s+shadow/.test(lower) || /\bshadow-lg\b/.test(lower)) && !removal;
 
-  if (shadow && removal) {
+  if (isNegatedDropShadow(raw, lower)) {
+    return {
+      kind: "unsupported",
+      reason: "Negation/multi-constraint intent refused. Declaring rule mode refuse; className stays as-is.",
+      ruleMode: "refuse"
+    };
+  }
+  if (isExplicitDropShadow(raw, lower)) {
     return { kind: "dropCategory", category: "shadow" };
+  }
+  if (shadow && removal) {
+    return {
+      kind: "unsupported",
+      reason: "Ambiguous shadow intent. Refusing to invert it. Current className stays as-is.",
+      ruleMode: "refuse"
+    };
   }
   if (shadow && !addShadow) {
     return {
       kind: "unsupported",
-      reason: "Ambiguous shadow intent. Refusing to invert it. Current className stays as-is."
+      reason: "Ambiguous shadow intent. Refusing to invert it. Current className stays as-is.",
+      ruleMode: "refuse"
     };
   }
   if (addShadow) return { kind: "merge", tokens: "shadow-lg" };

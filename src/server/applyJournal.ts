@@ -2,7 +2,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { atomicWriteJson } from "./atomicWrite.ts";
 import { PathJailError, resolveProjectPath } from "./pathJail.ts";
-import { copyFileNoFollow, unlinkNoFollow, writeFileNoFollow, contentHash, readPresence } from "./fileBytes.ts";
+import { copyFileNoFollow, unlinkNoFollow, writeFileNoFollow, readPresence } from "./fileBytes.ts";
+import { fingerprintPresence } from "./frozenChangeset.ts";
 
 export type ApplyJournalPhase = "prepared" | "applying" | "committed" | "blocked";
 
@@ -150,11 +151,54 @@ export class ApplyJournal {
         journal.error || "Apply recovery is blocked. Inspect .designer/apply-journal.json."
       );
     }
+    if (journal.backups.length === 0) {
+      await this.clear();
+      return { recovered: false };
+    }
     try {
+      const plannedByRel = new Map(journal.planned.map((op) => [op.rel, op]));
+      const classified: Array<{
+        rel: string;
+        beforeHash: string | null | undefined;
+        afterHash: string | null | undefined;
+        backupRel: string | null;
+      }> = [];
+      const seen = new Set<string>();
+      for (const item of journal.backups) {
+        const planned = plannedByRel.get(item.rel);
+        classified.push({
+          rel: item.rel,
+          beforeHash: hashField(item.beforeHash) ? item.beforeHash : planned?.beforeHash,
+          afterHash: hashField(item.afterHash) ? item.afterHash : planned?.afterHash,
+          backupRel: item.backupRel
+        });
+        seen.add(item.rel);
+      }
+      for (const op of journal.planned) {
+        if (seen.has(op.rel)) continue;
+        classified.push({
+          rel: op.rel,
+          beforeHash: op.beforeHash,
+          afterHash: op.afterHash,
+          backupRel: null
+        });
+      }
+
+      for (const item of classified) {
+        if (!hashField(item.beforeHash) || !hashField(item.afterHash)) {
+          await this.block(journal, `Recovery blocked: journal for ${item.rel} is missing before/after hashes.`);
+        }
+        const current = await readPresence(resolveProjectPath(this.projectRoot, item.rel));
+        const now = fingerprintPresence(current);
+        if (now === item.afterHash || now === item.beforeHash) continue;
+        await this.block(
+          journal,
+          `Recovery blocked: ${item.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
+        );
+      }
+
       for (const item of [...journal.backups].reverse()) {
         const to = resolveProjectPath(this.projectRoot, item.rel);
-        const current = await readPresence(to);
-        if (this.isUserRepair(current, item)) continue;
         if (item.backupRel) {
           const backupAbs = resolveProjectPath(this.projectRoot, item.backupRel);
           await fs.mkdir(path.dirname(to), { recursive: true });
@@ -173,6 +217,14 @@ export class ApplyJournal {
       await atomicWriteJson(this.filePath, journal);
       throw new ApplyJournalBlockedError(journal.error);
     }
+  }
+
+  private async block(journal: ApplyJournalEntry, message: string): Promise<never> {
+    journal.phase = "blocked";
+    journal.error = message;
+    journal.updatedAt = new Date().toISOString();
+    await atomicWriteJson(this.filePath, journal);
+    throw new ApplyJournalBlockedError(message);
   }
 
   public async begin(batchId: string, planned: ApplyJournalOp[]): Promise<ApplyJournalEntry> {
@@ -244,17 +296,10 @@ export class ApplyJournal {
     }
   }
 
-  private isUserRepair(
-    current: Awaited<ReturnType<typeof readPresence>>,
-    item: ApplyJournalBackup
-  ): boolean {
-    if (typeof item.afterHash !== "string" || item.afterHash.length === 0) return false;
-    if (current.kind !== "bytes") return false;
-    const now = contentHash(current.bytes);
-    if (now === item.afterHash) return false;
-    if (typeof item.beforeHash === "string" && now === item.beforeHash) return false;
-    return true;
-  }
+}
+
+function hashField(value: string | null | undefined): value is string | null {
+  return typeof value === "string" || value === null;
 }
 
 export { writeFileNoFollow };

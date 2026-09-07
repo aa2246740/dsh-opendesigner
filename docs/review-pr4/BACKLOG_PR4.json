@@ -21,7 +21,7 @@
       "id": "PR4-F03",
       "mapsTo": "R02 R03",
       "title": "Journal recovery is honest",
-      "acceptance": "Corrupt JSON is BATCH_RECOVERY_BLOCKED. User repairs after half-apply are kept. Good replay (P02) still restores."
+      "acceptance": "Corrupt JSON is BATCH_RECOVERY_BLOCKED. User repairs after half-apply are kept and recovery blocks (journal retained). Hashless auto-restore was removed in PR4-R2-03; hashed C07 rollback still restores when fingerprints match."
     },
     {
       "id": "PR4-F04",

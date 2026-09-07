@@ -15,9 +15,16 @@ import { CheckpointLog, type CheckpointKind, type SourceOverlay } from "./checkp
 import { AgentBatchRegistry, BatchError, GitRequiredError, type BatchApplyResult } from "./agentBatch.ts";
 import { ApplyJournalBlockedError } from "./applyJournal.ts";
 import { RuntimeBusyError, RuntimeLock } from "./runtimeLock.ts";
-import { hashFrozenChangeset } from "./frozenChangeset.ts";
+import { hashFrozenChangeset, cloneFrozenChangeset, type FrozenChangeset } from "./frozenChangeset.ts";
 import { contentHash, readPresence, writeFileNoFollow, readTextNoFollow } from "./fileBytes.ts";
-import { SourceBaselineStore, readBaselinePresence, bytesFromBaseline } from "./sourceBaseline.ts";
+import { SourceBaselineStore, bytesFromBaseline, readBaselinePresence } from "./sourceBaseline.ts";
+import {
+  applyRestorePlan,
+  materializeOverlayEntry,
+  migrateOverlay,
+  overlayRoot,
+  type RestorePlanStep
+} from "./sourceOverlay.ts";
 import { git } from "./gitExec.ts";
 import { importJsxToElements } from "../compiler/jsxImport.ts";
 import {
@@ -93,7 +100,9 @@ export class OpenDesignerService {
   public sessionTouched = new Set<string>();
   private sourceBaselines: SourceBaselineStore;
   private pendingProposal: SourcePatchProposal | null = null;
+  private approvedChangeset: FrozenChangeset | null = null;
   private saveChain: Promise<unknown> = Promise.resolve();
+  private commandChain: Promise<unknown> = Promise.resolve();
   private runtimeLock: RuntimeLock;
   private initPromise: Promise<void> | null = null;
 
@@ -313,51 +322,49 @@ export class OpenDesignerService {
   }
 
   public async captureSourceFiles(): Promise<SourceOverlay> {
-    const files: SourceOverlay = {};
+    const worktreeKey = this.worktreeKey();
     const root = this.fileIoRoot();
+    const files: SourceOverlay["files"] = {};
     for (const rel of this.sessionTouched) {
       const abs = resolveProjectPath(root, rel);
-      const presence = await readPresence(abs);
-      if (presence.kind === "unreadable") continue;
-      if (presence.kind === "absent") {
-        files[rel] = null;
-        continue;
-      }
-      const text = presence.bytes.toString("utf8");
-      if (presence.bytes.includes(0) || !Buffer.from(text, "utf8").equals(presence.bytes)) continue;
-      files[rel] = text;
+      files[rel] = await readBaselinePresence(abs);
     }
-    return files;
+    return {
+      workspaceId: this.projectId,
+      worktreeKey,
+      files
+    };
   }
 
   public async restoreSourceFiles(files?: SourceOverlay): Promise<void> {
-    const root = this.fileIoRoot();
-    const worktree = this.worktreeKey();
-    const baseline = this.sourceBaselines.overlay(worktree);
-    const rels = new Set<string>([...this.sessionTouched, ...Object.keys(baseline), ...Object.keys(files ?? {})]);
+    const overlay = migrateOverlay(files);
+    const worktreeKey = overlay?.worktreeKey || ".";
+    if (overlay?.workspaceId && overlay.workspaceId !== this.projectId) {
+      const error = new Error("Checkpoint workspace identity does not match this runtime.");
+      (error as Error & { code: string }).code = "CHECKPOINT_WORKSPACE_MISMATCH";
+      throw error;
+    }
+    const root = overlayRoot(this.projectRoot, worktreeKey);
+    const overlayFiles = overlay?.files ?? {};
+    const baseline = this.sourceBaselines.overlay(worktreeKey || ".");
+    const rels = new Set<string>([...this.sessionTouched, ...Object.keys(baseline), ...Object.keys(overlayFiles)]);
+    const plan: RestorePlanStep[] = [];
     for (const rel of rels) {
-      const hasSnap = Boolean(files && Object.prototype.hasOwnProperty.call(files, rel));
-      const abs = resolveProjectPath(root, rel);
-      if (hasSnap) {
-        const content = files![rel];
-        if (content === null || content === undefined) await fs.rm(abs, { force: true });
-        else {
-          await fs.mkdir(path.dirname(abs), { recursive: true });
-          await writeFileNoFollow(abs, content);
-        }
+      if (Object.prototype.hasOwnProperty.call(overlayFiles, rel)) {
+        plan.push(materializeOverlayEntry(root, rel, overlayFiles[rel]!));
         continue;
       }
       const remembered = baseline[rel];
       if (!remembered || remembered.kind === "unreadable") continue;
       if (remembered.kind === "absent") {
-        await fs.rm(abs, { force: true });
+        plan.push({ rel, abs: resolveProjectPath(root, rel), bytes: null });
         continue;
       }
       const bytes = bytesFromBaseline(remembered);
       if (!bytes) continue;
-      await fs.mkdir(path.dirname(abs), { recursive: true });
-      await writeFileNoFollow(abs, bytes);
+      plan.push({ rel, abs: resolveProjectPath(root, rel), bytes });
     }
+    await applyRestorePlan(plan);
   }
 
   private async rememberSourceBaselines(toolName: string, args: Record<string, unknown>): Promise<void> {
@@ -383,11 +390,12 @@ export class OpenDesignerService {
 
   public async pushCheckpoint(input: { label: string; kind?: CheckpointKind }): Promise<unknown> {
     const sourceFiles = await this.captureSourceFiles();
+    const hasFiles = Object.keys(sourceFiles.files).length > 0;
     const checkpoint = await this.checkpoints.push({
       label: input.label,
-      kind: input.kind ?? (Object.keys(sourceFiles).length > 0 ? "session" : "canvas"),
+      kind: input.kind ?? (hasFiles ? "session" : "canvas"),
       store: this.store.toJSON(),
-      sourceFiles: Object.keys(sourceFiles).length > 0 ? sourceFiles : undefined
+      sourceFiles
     });
     return {
       success: true,
@@ -404,12 +412,13 @@ export class OpenDesignerService {
   }
 
   public async rewind(checkpointId?: string): Promise<unknown> {
-    const checkpoint = checkpointId
-      ? await this.checkpoints.rewindTo(checkpointId)
-      : await this.checkpoints.rewind();
-    this.store.fromJSON(checkpoint.store);
+    const plan = checkpointId
+      ? this.checkpoints.planRewindTo(checkpointId)
+      : this.checkpoints.planRewind();
+    await this.restoreSourceFiles(plan.checkpoint.sourceFiles);
+    this.store.fromJSON(plan.checkpoint.store);
     this.storeVersion += 1;
-    await this.restoreSourceFiles(checkpoint.sourceFiles);
+    const checkpoint = await this.checkpoints.commitRewind(plan);
     await this.saveCanvas();
     return {
       success: true,
@@ -449,6 +458,17 @@ export class OpenDesignerService {
   }
 
   public async applyOpenBatchFiles(batchId: string): Promise<BatchApplyResult> {
+    const approved = this.approvedChangeset;
+    this.approvedChangeset = null;
+    if (approved) {
+      if (approved.batchId !== batchId) {
+        throw new ApprovalDeniedError("Approved changeset does not match this batch.");
+      }
+      if (approved.ops.length === 0) {
+        throw new BatchError("No file diffs to apply", "NO_FILE_DIFFS");
+      }
+      return await this.batches.commitPrepared(approved);
+    }
     const diffs = await this.batches.previewDiffs(batchId);
     if (diffs.length === 0) {
       throw new BatchError("No file diffs to apply", "NO_FILE_DIFFS");
@@ -497,6 +517,23 @@ export class OpenDesignerService {
   }
 
   public async executeTool(
+    toolName: string,
+    args: Record<string, any> = {},
+    options: ExecuteToolOptions = {}
+  ): Promise<any> {
+    return this.enqueueCommand(() => this.executeToolUngated(toolName, args, options));
+  }
+
+  private enqueueCommand<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.commandChain.then(fn, fn);
+    this.commandChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async executeToolUngated(
     toolName: string,
     args: Record<string, any> = {},
     options: ExecuteToolOptions = {}
@@ -554,11 +591,22 @@ export class OpenDesignerService {
         err instanceof ApplyJournalBlockedError ||
         err instanceof RuntimeBusyError
       ) {
-        return { success: false, error: err.message, code: err.code };
+        return {
+          success: false,
+          error: err.message,
+          code: err.code,
+          ...(err instanceof SourcePatchError && err.ruleMode ? { ruleMode: err.ruleMode } : {})
+        };
       }
       if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
         const code = (err as { code: string }).code;
-        if (code === "NOTHING_TO_REWIND" || code === "CHECKPOINT_NOT_FOUND") {
+        if (
+          code === "NOTHING_TO_REWIND" ||
+          code === "CHECKPOINT_NOT_FOUND" ||
+          code === "CHECKPOINT_UNREADABLE" ||
+          code === "CHECKPOINT_HASH_MISMATCH" ||
+          code === "CHECKPOINT_WORKSPACE_MISMATCH"
+        ) {
           return { success: false, error: err instanceof Error ? err.message : String(err), code };
         }
         if (code === "ENOENT") {
@@ -570,6 +618,10 @@ export class OpenDesignerService {
   }
 
   public async issueHostReceipt(tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    return this.enqueueCommand(() => this.issueHostReceiptUngated(tool, args));
+  }
+
+  private async issueHostReceiptUngated(tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
     await this.init();
     const diffHash = await this.toolDiffHash(tool, args);
     const receipt = await this.approvals.issue({
@@ -637,7 +689,8 @@ export class OpenDesignerService {
       if (intent.kind === "unsupported" || nextClass === null) {
         throw new SourcePatchError(
           `${liveError || (intent.kind === "unsupported" ? intent.reason : "Unsupported edit.")} currentClassName=${JSON.stringify(beforeClassName)}`,
-          "UNSUPPORTED_EDIT"
+          "UNSUPPORTED_EDIT",
+          { ruleMode: intent.kind === "unsupported" ? intent.ruleMode : undefined }
         );
       }
       const patched = classNamePatch({
@@ -889,6 +942,19 @@ export class OpenDesignerService {
         : "auto";
     if (mode === "auto") return;
     if (ctx.autoApprove === true) return;
+    if (toolName === "batch_apply" && typeof args.batchId === "string") {
+      const frozen = await this.batches.captureFrozen(args.batchId);
+      const diffHash = hashFrozenChangeset(frozen);
+      await this.approvals.consume({
+        receiptId: args.approvalReceipt,
+        projectId: this.projectId,
+        revision: this.storeVersion,
+        diffHash,
+        tool: toolName
+      });
+      this.approvedChangeset = cloneFrozenChangeset(frozen);
+      return;
+    }
     const diffHash = await this.toolDiffHash(toolName, args);
     await this.approvals.consume({
       receiptId: args.approvalReceipt,
