@@ -2785,6 +2785,8 @@ html,body{font-family:ui-sans-serif,system-ui,sans-serif;}
             <button type="button" data-testid="ai-accept" id="od-ai-accept" disabled data-tooltip="Accept the proposal and checkpoint">\u63A5\u53D7</button>
             <button type="button" data-testid="ai-reject" id="od-ai-reject" disabled data-tooltip="Reject with no residue">\u62D2\u7EDD</button>
           </div>
+          <div class="od-hint" data-testid="receipt-kind">Local HTTP debug receipts are not human approval of a seen diff. Accept binds the exact diff hash. Reject writes nothing.</div>
+          </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
           <div class="od-actions">
@@ -3136,6 +3138,7 @@ html,body{font-family:ui-sans-serif,system-ui,sans-serif;}
 intent: ${instruction}
 before: ${proposal.beforeClassName}
 after: ${proposal.afterClassName}
+diffHash bind: ${proposal.afterHash || proposal.sourceHash}
 ${proposal.preview}
 Accept writes this file. Reject leaves the repo unchanged.`;
         syncProposalButtons();
@@ -3173,7 +3176,7 @@ Accept writes this file. Reject leaves the repo unchanged.`;
       await callTool("reject_source_patch");
       proposal = null;
       aiBannerEl.textContent = "ChangeSet rejected with no residue";
-      aiEl.textContent = "Rejected. Store and repo unchanged.";
+      aiEl.textContent = "Rejected. Store and repo unchanged. No write.";
       syncProposalButtons();
       render();
     });
@@ -3287,6 +3290,10 @@ Accept writes this file. Reject leaves the repo unchanged.`;
             const receipt = await issued.json().catch(() => ({ success: false }));
             if (!issued.ok || receipt.success === false || typeof receipt.approvalReceipt !== "string") {
               return { success: false, error: receipt.error || "DENIED: no approval receipt", code: "DENIED" };
+            }
+            const persistHost = document.getElementById("od-persist");
+            if (persistHost) {
+              persistHost.textContent = `debug receipt (${String(receipt.receiptKind || "debug-http")}) \u2260 human approval of seen diff. tool=${tool} diffHash=${String(receipt.diffHash || "").slice(0, 16)}`;
             }
             payloadArgs = { ...payloadArgs, approvalReceipt: receipt.approvalReceipt };
           }

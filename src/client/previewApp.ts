@@ -43,6 +43,7 @@ export interface ChangeSetProposal {
   afterClassName: string;
   preview: string;
   mergedCode: string;
+  afterHash?: string;
 }
 
 export function autosaveClearsDirty(
@@ -614,7 +615,7 @@ export function mountPreview(root: HTMLElement, api: PreviewApi = {}): CanvasPan
     if (result.success && result.proposal && typeof result.proposal === "object") {
       proposal = result.proposal as ChangeSetProposal;
       aiBannerEl.textContent = `proposal ${proposal.id} file=${proposal.filePath} hash=${proposal.sourceHash.slice(0, 8)}`;
-    aiEl.textContent = `${aiBannerEl.textContent}\nintent: ${instruction}\nbefore: ${proposal.beforeClassName}\nafter: ${proposal.afterClassName}\ndiffHash bind: ${proposal.afterHash || proposal.sourceHash}\n${proposal.preview}\nAccept writes this file. Reject leaves the repo unchanged.`;
+      aiEl.textContent = `${aiBannerEl.textContent}\nintent: ${instruction}\nbefore: ${proposal.beforeClassName}\nafter: ${proposal.afterClassName}\ndiffHash bind: ${proposal.afterHash || proposal.sourceHash}\n${proposal.preview}\nAccept writes this file. Reject leaves the repo unchanged.`;
       syncProposalButtons();
       return;
     }
@@ -773,7 +774,10 @@ if (typeof window !== "undefined") {
           if (!issued.ok || receipt.success === false || typeof receipt.approvalReceipt !== "string") {
             return { success: false, error: receipt.error || "DENIED: no approval receipt", code: "DENIED" };
           }
-          persistEl.textContent = `debug receipt (${String(receipt.receiptKind || "debug-http")}) ≠ human approval of seen diff. tool=${tool} diffHash=${String(receipt.diffHash || "").slice(0, 16)}`;
+          const persistHost = document.getElementById("od-persist");
+          if (persistHost) {
+            persistHost.textContent = `debug receipt (${String(receipt.receiptKind || "debug-http")}) ≠ human approval of seen diff. tool=${tool} diffHash=${String(receipt.diffHash || "").slice(0, 16)}`;
+          }
           payloadArgs = { ...payloadArgs, approvalReceipt: receipt.approvalReceipt };
         }
         const res = await fetch("/api/tool", {
