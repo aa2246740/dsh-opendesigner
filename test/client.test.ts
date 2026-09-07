@@ -21,6 +21,7 @@ import {
   setVirtualLocation
 } from "../src/client/next-shims/navigation.ts";
 import { Inter, createGoogleFontStub } from "../src/client/next-shims/font.ts";
+import { autosaveClearsDirty } from "../src/client/previewApp.ts";
 
 describe("Client - 2D Affine Transform & Coordinate Mapping", () => {
   it("should accurately transform world to screen and back", () => {
@@ -224,5 +225,13 @@ describe("Client - DSH Web Client Artifact lib/client.js", () => {
     assert.equal(clientState.selectedElementIds.length, 0);
     assert.ok(clientState.panel);
     assert.equal(typeof clientState.panel.registerElement, "function");
+  });
+});
+
+describe("Preview autosave dirty flag (OD-10)", () => {
+  it("keeps dirty when HTTP or result fails", () => {
+    assert.equal(autosaveClearsDirty(false, { success: true }), false);
+    assert.equal(autosaveClearsDirty(true, { success: false }), false);
+    assert.equal(autosaveClearsDirty(true, { success: true }), true);
   });
 });

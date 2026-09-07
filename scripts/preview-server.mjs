@@ -3,12 +3,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { OpenDesignerService } from "../src/server/index.ts";
+import { OpenDesignerService, ProjectMismatchError, StaleHydrateError } from "../src/server/index.ts";
 import { detectAiConfigFromEnv, generateAndApplyLive } from "../src/server/aiGateway.ts";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
-const projectRoot = path.join(root, "test-fixtures/preview-root");
+const defaultProject = path.join(root, "examples/programmer-page");
+const projectRoot = path.resolve(process.env.OPENDESIGNER_PROJECT_ROOT || defaultProject);
 await fs.mkdir(projectRoot, { recursive: true });
 
 async function ensurePreviewGit(dir) {
@@ -16,12 +17,17 @@ async function ensurePreviewGit(dir) {
     await fs.stat(path.join(dir, ".git"));
     return;
   } catch {
-    // Create a nested git root for the preview fixture.
+    // Create a git root for the preview project.
   }
   await execFileAsync("git", ["init", "-b", "main"], { cwd: dir });
   await execFileAsync(
     "git",
-    ["-c", "user.email=preview@local", "-c", "user.name=OpenDesigner", "commit", "--allow-empty", "-m", "preview root"],
+    ["-c", "user.email=preview@local", "-c", "user.name=OpenDesigner", "add", "-A"],
+    { cwd: dir }
+  );
+  await execFileAsync(
+    "git",
+    ["-c", "user.email=preview@local", "-c", "user.name=OpenDesigner", "commit", "--allow-empty", "-m", "preview project"],
     { cwd: dir }
   );
 }
@@ -31,7 +37,7 @@ await ensurePreviewGit(projectRoot);
 const service = new OpenDesignerService({
   projectRoot,
   autoApprove: false,
-  screenshotMode: "jsx-svg",
+  screenshotMode: "html-render",
   aiConfig: {
     ...detectAiConfigFromEnv(),
     mockMode: process.env.OPENDESIGNER_FORCE_MOCK === "1" ? true : undefined
@@ -48,9 +54,26 @@ const MIME = {
   ".json": "application/json; charset=utf-8"
 };
 
+const CSP =
+  "default-src 'self'; script-src 'self' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; img-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'none'";
+
 function send(res, status, body, type = "text/plain; charset=utf-8") {
-  res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
+  res.writeHead(status, {
+    "Content-Type": type,
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": CSP,
+    "X-Content-Type-Options": "nosniff"
+  });
   res.end(body);
+}
+
+function isPublicFile(resolved) {
+  const rel = path.relative(root, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return false;
+  if (resolved === path.join(root, "preview.html")) return true;
+  if (rel === "preview" || rel.startsWith(`preview${path.sep}`)) return true;
+  if (rel === "lib" || rel.startsWith(`lib${path.sep}`)) return true;
+  return false;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -65,13 +88,43 @@ const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-    service.hydrateStore(payload);
-    send(res, 200, JSON.stringify({ success: true }), MIME[".json"]);
+    try {
+      service.hydrateStore(payload);
+      send(
+        res,
+        200,
+        JSON.stringify({
+          success: true,
+          projectId: service.projectId,
+          version: service.storeVersion
+        }),
+        MIME[".json"]
+      );
+    } catch (err) {
+      const code =
+        err instanceof StaleHydrateError || err instanceof ProjectMismatchError
+          ? err.code
+          : err && typeof err === "object" && "code" in err
+            ? err.code
+            : "HYDRATE_FAILED";
+      send(
+        res,
+        409,
+        JSON.stringify({
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          code,
+          projectId: service.projectId,
+          version: service.storeVersion
+        }),
+        MIME[".json"]
+      );
+    }
     return;
   }
 
   if (url.pathname === "/api/canvas") {
-    send(res, 200, JSON.stringify(service.store.toJSON()), MIME[".json"]);
+    send(res, 200, JSON.stringify(service.canvasPayload()), MIME[".json"]);
     return;
   }
 
@@ -80,7 +133,9 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
     try {
-      const result = await service.executeTool(payload.tool, payload.args || {});
+      const result = await service.executeTool(payload.tool, payload.args || {}, {
+        approvalChannel: "host"
+      });
       send(res, 200, JSON.stringify(result), MIME[".json"]);
     } catch (err) {
       send(
@@ -137,8 +192,7 @@ const server = http.createServer(async (req, res) => {
 
   let filePath = url.pathname === "/" ? path.join(root, "preview.html") : path.join(root, decodeURIComponent(url.pathname));
   const resolved = path.resolve(filePath);
-  const rel = path.relative(root, resolved);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  if (!isPublicFile(resolved)) {
     send(res, 403, "forbidden");
     return;
   }
@@ -154,5 +208,6 @@ const server = http.createServer(async (req, res) => {
 const port = Number(process.env.PORT || 4173);
 server.listen(port, "127.0.0.1", () => {
   console.log(`OpenDesigner preview http://127.0.0.1:${port}/`);
+  console.log(`projectRoot ${projectRoot}`);
   console.log(`status ${JSON.stringify(service.status())}`);
 });

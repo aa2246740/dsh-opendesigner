@@ -68,8 +68,12 @@ export function getTailwindCategory(token: string): string {
   }
 
   // 3. 边框与圆角
-  if (/^rounded-(t|b|l|r|tl|tr|bl|br)(-.*)?$/.test(baseToken)) {
-    const side = baseToken.match(/^rounded-(t|b|l|r|tl|tr|bl|br)/)![1];
+  if (/^rounded-(tl|tr|bl|br|ss|se|ee|es|s|e)(-.*)?$/.test(baseToken)) {
+    const corner = baseToken.match(/^rounded-(tl|tr|bl|br|ss|se|ee|es|s|e)/)![1];
+    return `${prefix}rounded-${corner}`;
+  }
+  if (/^rounded-(t|b|l|r)(-.*)?$/.test(baseToken)) {
+    const side = baseToken.match(/^rounded-(t|b|l|r)/)![1];
     return `${prefix}rounded-${side}`;
   }
   if (/^rounded(-.*)?$/.test(baseToken)) {
@@ -90,6 +94,10 @@ export function getTailwindCategory(token: string): string {
   }
   if (/^border(-\d+|-\[\d+[^\]]*\])?$/.test(baseToken)) {
     return `${prefix}border-width`;
+  }
+  if (/^border-(t|b|l|r)-/.test(baseToken)) {
+    const side = baseToken.match(/^border-(t|b|l|r)/)![1];
+    return `${prefix}border-color-${side}`;
   }
   if (/^border-/.test(baseToken)) {
     return `${prefix}border-color`;
@@ -113,8 +121,14 @@ export function getTailwindCategory(token: string): string {
   // 6. 布局模式与对齐
   if (/^flex-(row|row-reverse|col|col-reverse)$/.test(baseToken)) return `${prefix}flex-direction`;
   if (/^flex-(wrap|wrap-reverse|nowrap)$/.test(baseToken)) return `${prefix}flex-wrap`;
-  if (/^flex-(1|auto|initial|none)$/.test(baseToken) || /^grow(-.*)?$/.test(baseToken) || /^shrink(-.*)?$/.test(baseToken)) {
-    return `${prefix}flex-grow-shrink`;
+  if (/^flex-(1|auto|initial|none)$/.test(baseToken)) {
+    return `${prefix}flex-size`;
+  }
+  if (/^grow(-.*)?$/.test(baseToken)) {
+    return `${prefix}flex-grow`;
+  }
+  if (/^shrink(-.*)?$/.test(baseToken)) {
+    return `${prefix}flex-shrink`;
   }
   if (/^(block|inline-block|inline|flex|inline-flex|grid|inline-grid|hidden)$/.test(baseToken)) {
     return `${prefix}display`;

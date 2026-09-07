@@ -10,7 +10,7 @@ import type { Point, Rect, ResizeHandle } from "../geometry.ts";
 import { rectsIntersect } from "../geometry.ts";
 import type { SnapGuide } from "../snapping.ts";
 import { SelectionManager } from "../selection.ts";
-import { ComponentSandbox } from "../sandbox.ts";
+import { ComponentSandbox, sandboxIframeMarkup } from "../sandbox.ts";
 import { StylesPanelManager } from "../stylesPanel.ts";
 import { InfiniteCanvasViewport } from "./viewport.ts";
 import { SelectionOverlayRenderer } from "./overlay.ts";
@@ -289,7 +289,7 @@ export class CanvasPanel {
     return [
       `<div class="opendesigner-canvas-container" data-testid="canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
       `  <div class="canvas-viewport-layer" data-testid="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;width:100%;height:100%;">`,
-      `    ${elementsHtml.join("\n    ")}`,
+      `    ${sandboxIframeMarkup(elementsHtml.join("\n    "))}`,
       `    <div class="canvas-overlay-host" data-testid="canvas-overlay" style="pointer-events:none;position:absolute;inset:0;">${overlaySvg}</div>`,
       `  </div>`,
       `</div>`

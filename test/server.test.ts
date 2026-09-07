@@ -124,7 +124,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     service = new OpenDesignerService({
       projectRoot: TEST_DIR,
       autoApprove: true,
-      screenshotMode: "jsx-svg"
+      screenshotMode: "html-render"
     });
     await service.init();
   });
@@ -196,8 +196,9 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     // 6. Screenshot inspection
     const shotRes = await service.executeTool("take_screenshot", { elementId: rootId });
     assert.equal(shotRes.success, true);
-    assert.ok(shotRes.screenshotDataUrl.startsWith("data:image/svg+xml"));
-    assert.equal(shotRes.kind, "jsx-svg");
+    assert.equal(shotRes.kind, "html-render");
+    assert.equal(shotRes.visualProof, true);
+    assert.ok(String(shotRes.screenshotDataUrl).startsWith("data:text/html"));
 
     // 7. Release now succeeds
     const verifiedRelease = await service.executeTool("canvas_release", { claim_id: claimId });
@@ -312,12 +313,24 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     assert.equal(denied.success, false);
     assert.equal(denied.code, "APPROVAL_REQUIRED");
 
-    const approved = await jailed.executeTool("project_write", {
-      path: "src/denied.tsx",
-      content: "ok",
+    const approved = await jailed.executeTool(
+      "project_write",
+      {
+        path: "src/denied.tsx",
+        content: "ok",
+        approve: true
+      },
+      { approvalChannel: "host" }
+    );
+    assert.equal(approved.success, true);
+
+    const modelApprove = await jailed.executeTool("project_write", {
+      path: "src/denied-model.tsx",
+      content: "nope",
       approve: true
     });
-    assert.equal(approved.success, true);
+    assert.equal(modelApprove.success, false);
+    assert.equal(modelApprove.code, "APPROVAL_REQUIRED");
 
     const auto = new OpenDesignerService({ projectRoot: TEST_DIR, autoApprove: true });
     const autoWrite = await auto.executeTool("project_write", {
@@ -344,5 +357,31 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     const shot = await closed.executeTool("take_screenshot", { elementId: pageRes.rootElementId });
     assert.equal(shot.success, false);
     assert.equal(shot.implemented, false);
+  });
+
+  it("does not treat jsx-svg as visual proof", async () => {
+    const fake = new OpenDesignerService({
+      projectRoot: TEST_DIR,
+      autoApprove: true,
+      screenshotMode: "jsx-svg"
+    });
+    const pageRes = await fake.executeTool("canvas_create_page", { name: "SvgShot" });
+    const rootId = pageRes.rootElementId;
+    const readRes = await fake.executeTool("canvas_read", { elementId: rootId });
+    const claimRes = await fake.executeTool("canvas_claim", {
+      elementId: rootId,
+      covering_hash: readRes.covering_hash
+    });
+    await fake.executeTool("canvas_update", {
+      claim_id: claimRes.claimId,
+      elementId: rootId,
+      props: { className: "bg-black" }
+    });
+    const shot = await fake.executeTool("take_screenshot", { elementId: rootId });
+    assert.equal(shot.success, true);
+    assert.equal(shot.kind, "jsx-svg");
+    assert.equal(shot.visualProof, false);
+    const unverified = await fake.executeTool("canvas_release", { claim_id: claimRes.claimId });
+    assert.equal(unverified.success, false);
   });
 });

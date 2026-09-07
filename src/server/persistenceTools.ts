@@ -38,7 +38,7 @@ export const PERSISTENCE_TOOLS: MCPToolDefinition[] = [
   },
   {
     name: "apply_to_project",
-    description: "Explicit human Save/Apply. Persists the working copy and stamps .designer/applied.json. Never git commit. Requires approve.",
+    description: "Save the design draft to .designer/canvas.json (保存设计稿). This does not apply source file diffs. Never git commit. Requires host approval.",
     category: "project",
     destructive: true,
     parameters: { type: "object", properties: {} }
@@ -63,8 +63,18 @@ export const PERSISTENCE_TOOLS: MCPToolDefinition[] = [
     }
   },
   {
+    name: "batch_preview",
+    description: "List file diffs an open Agent batch would apply. Does not write.",
+    category: "project",
+    parameters: {
+      type: "object",
+      properties: { batchId: { type: "string", description: "Batch id" } },
+      required: ["batchId"]
+    }
+  },
+  {
     name: "batch_apply",
-    description: "Copy jailed Agent-batch worktree files into the project tree, then remove the worktree. Never git commit. Requires approve.",
+    description: "应用到工程: copy jailed Agent-batch worktree file diffs into the project through a conflict-checked recoverable transaction. Refuses concurrent user edits. Never git commit. Requires host approval.",
     category: "project",
     destructive: true,
     parameters: {

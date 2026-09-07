@@ -21,13 +21,14 @@ export interface MCPToolDefinition {
   parameters?: Record<string, any>;
 }
 
-export type ScreenshotMode = "none" | "jsx-svg";
+export type ScreenshotMode = "none" | "jsx-svg" | "html-render";
 
 export interface MCPContext {
   projectRoot: string;
   store: FlatStore;
   claims: ClaimRegistry;
   autoApprove?: boolean;
+  approvalChannel?: "host" | "model";
   screenshotMode?: ScreenshotMode;
   captureScreenshot?: (elementId: string) => Promise<string | null>;
   saveCanvas?: () => Promise<void>;
@@ -771,7 +772,9 @@ export async function dispatchMCPTool(
 
       const res = claims.claim(elementId, covering_hash, {
         holder: args.holder,
-        expectedHash: currentHash
+        expectedHash: currentHash,
+        isRelated: (lockedId, requestedId) =>
+          store.isDescendant(lockedId, requestedId) || store.isDescendant(requestedId, lockedId)
       });
       return res;
     }
@@ -1020,23 +1023,37 @@ export async function dispatchMCPTool(
     case "take_screenshot": {
       const elementId = args.elementId || "";
       let screenshotDataUrl: string | null = null;
+      let kind: "renderer" | "html-render" | "jsx-svg" = "jsx-svg";
+      let visualProof = false;
 
       if (ctx.captureScreenshot) {
         screenshotDataUrl = await ctx.captureScreenshot(elementId);
+        kind = "renderer";
+        visualProof = Boolean(screenshotDataUrl);
+      } else if (ctx.screenshotMode === "html-render" && elementId) {
+        const { ComponentSandbox } = await import("../client/sandbox.ts");
+        const sandbox = new ComponentSandbox();
+        const html = sandbox.renderToHtml(store, elementId);
+        screenshotDataUrl = `data:text/html;base64,${Buffer.from(html, "utf8").toString("base64")}`;
+        kind = "html-render";
+        visualProof = true;
       } else if (ctx.screenshotMode === "jsx-svg" && elementId) {
         const jsx = elementToJSX(store, elementId);
         screenshotDataUrl = snapshotJsxAsSvgDataUrl(elementId, jsx);
+        kind = "jsx-svg";
+        visualProof = false;
       }
 
       if (!screenshotDataUrl) {
         return {
           success: false,
           implemented: false,
-          error: "SCREENSHOT_UNAVAILABLE: no renderer is attached. OpenDesigner does not mark claims verified from a placeholder image."
+          visualProof: false,
+          error: "SCREENSHOT_UNAVAILABLE: no renderer is attached. jsx-svg is not visual proof."
         };
       }
 
-      if (elementId) {
+      if (visualProof && elementId) {
         claims.recordVerification(elementId);
         let parent = store.getParent(elementId);
         while (parent) {
@@ -1044,14 +1061,15 @@ export async function dispatchMCPTool(
           parent = store.getParent(parent.id);
         }
       }
-      if (args.claim_id) {
+      if (visualProof && args.claim_id) {
         claims.recordVerification(args.claim_id);
       }
 
       return {
         success: true,
         elementId,
-        kind: ctx.captureScreenshot ? "renderer" : "jsx-svg",
+        kind,
+        visualProof,
         screenshotDataUrl
       };
     }

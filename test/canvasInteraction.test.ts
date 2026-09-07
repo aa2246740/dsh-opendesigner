@@ -295,4 +295,24 @@ describe("Client - ComponentSandbox & Next.js Runtime Shims", () => {
     assert.ok(html.includes('data-testid="node-title"'));
     assert.ok(html.includes("Hello"));
   });
+
+  it("strips javascript URLs and event handler attributes", () => {
+    const store = new FlatStore();
+    store.setElement({
+      id: "evil",
+      type: "element",
+      tag: "a",
+      props: {
+        href: "javascript:alert(1)",
+        onclick: "alert(1)",
+        className: "link"
+      },
+      textContent: "x"
+    });
+    const sandbox = new ComponentSandbox();
+    const html = sandbox.renderToHtml(store, "evil");
+    assert.equal(html.includes("javascript:"), false);
+    assert.equal(html.includes("onclick"), false);
+    assert.ok(html.includes("link"));
+  });
 });

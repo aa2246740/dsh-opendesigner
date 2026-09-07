@@ -14,13 +14,15 @@ export interface CheckpointSnapshot {
   activePageId: string;
 }
 
+export type SourceOverlay = Record<string, string | null>;
+
 export interface Checkpoint {
   id: string;
   createdAt: string;
   label: string;
   kind: CheckpointKind;
   store: CheckpointSnapshot;
-  sourceFiles?: Record<string, string>;
+  sourceFiles?: SourceOverlay;
 }
 
 export interface CheckpointSummary {
@@ -33,6 +35,10 @@ export interface CheckpointSummary {
 interface CheckpointLogFile {
   entries: Checkpoint[];
   cursor: number;
+}
+
+function cloneSnapshot<T>(value: T): T {
+  return structuredClone(value);
 }
 
 export class CheckpointLog {
@@ -64,7 +70,7 @@ export class CheckpointLog {
     try {
       const raw = await fs.readFile(this.filePath, "utf-8");
       const data = JSON.parse(raw) as CheckpointLogFile;
-      this.entries = Array.isArray(data.entries) ? data.entries : [];
+      this.entries = Array.isArray(data.entries) ? cloneSnapshot(data.entries) : [];
       this.cursor = Number.isInteger(data.cursor) ? data.cursor : this.entries.length - 1;
       if (this.cursor >= this.entries.length) this.cursor = this.entries.length - 1;
     } catch {
@@ -84,7 +90,7 @@ export class CheckpointLog {
     label: string;
     kind: CheckpointKind;
     store: CheckpointSnapshot;
-    sourceFiles?: Record<string, string>;
+    sourceFiles?: SourceOverlay;
   }): Promise<Checkpoint> {
     if (this.cursor >= 0 && this.cursor < this.entries.length - 1) {
       this.entries = this.entries.slice(0, this.cursor + 1);
@@ -94,8 +100,8 @@ export class CheckpointLog {
       createdAt: new Date().toISOString(),
       label: input.label,
       kind: input.kind,
-      store: input.store,
-      sourceFiles: input.sourceFiles
+      store: cloneSnapshot(input.store),
+      sourceFiles: input.sourceFiles ? cloneSnapshot(input.sourceFiles) : undefined
     };
     this.entries.push(checkpoint);
     if (this.entries.length > this.maxEntries) {
@@ -114,7 +120,7 @@ export class CheckpointLog {
     }
     this.cursor -= 1;
     await this.persist();
-    return this.entries[this.cursor]!;
+    return cloneSnapshot(this.entries[this.cursor]!);
   }
 
   public async rewindTo(id: string): Promise<Checkpoint> {
@@ -127,6 +133,6 @@ export class CheckpointLog {
     this.cursor = index;
     this.entries = this.entries.slice(0, index + 1);
     await this.persist();
-    return this.entries[this.cursor]!;
+    return cloneSnapshot(this.entries[this.cursor]!);
   }
 }

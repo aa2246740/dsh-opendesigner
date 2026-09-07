@@ -21,6 +21,7 @@ var OpenDesignerPreview = (() => {
   // src/client/previewApp.ts
   var previewApp_exports = {};
   __export(previewApp_exports, {
+    autosaveClearsDirty: () => autosaveClearsDirty,
     mountPreview: () => mountPreview
   });
 
@@ -559,47 +560,97 @@ var OpenDesignerPreview = (() => {
   function createId() {
     return crypto.randomUUID();
   }
+  var GraphError = class extends Error {
+    code = "GRAPH_INVALID";
+    constructor(message) {
+      super(message);
+      this.name = "GraphError";
+    }
+  };
+  function emptyState() {
+    return {
+      byId: /* @__PURE__ */ new Map(),
+      childrenByParent: /* @__PURE__ */ new Map(),
+      parentByChild: /* @__PURE__ */ new Map(),
+      pages: [],
+      activePageId: ""
+    };
+  }
+  function assertValidGraph(data) {
+    const byId = data.byId || {};
+    const childrenByParent = data.childrenByParent || {};
+    const parentByChild = data.parentByChild || {};
+    const pages = data.pages || [];
+    for (const [parentId, children] of Object.entries(childrenByParent)) {
+      if (!byId[parentId]) {
+        throw new GraphError(`Missing parent node ${parentId}`);
+      }
+      if (!Array.isArray(children)) {
+        throw new GraphError(`childrenByParent.${parentId} must be an array`);
+      }
+      for (const childId of children) {
+        if (!byId[childId]) {
+          throw new GraphError(`Missing child node ${childId} under ${parentId}`);
+        }
+      }
+    }
+    for (const [childId, parentId] of Object.entries(parentByChild)) {
+      if (!byId[childId]) {
+        throw new GraphError(`parentByChild references missing child ${childId}`);
+      }
+      if (!byId[parentId]) {
+        throw new GraphError(`parentByChild references missing parent ${parentId}`);
+      }
+    }
+    const visiting = /* @__PURE__ */ new Set();
+    const visited = /* @__PURE__ */ new Set();
+    const visit = (id) => {
+      if (visited.has(id)) return;
+      if (visiting.has(id)) {
+        throw new GraphError(`Cycle detected at ${id}`);
+      }
+      visiting.add(id);
+      for (const childId of childrenByParent[id] || []) {
+        visit(childId);
+      }
+      visiting.delete(id);
+      visited.add(id);
+    };
+    for (const id of Object.keys(byId)) {
+      visit(id);
+    }
+    for (const page of pages) {
+      if (!page || typeof page.rootElementId !== "string" || !byId[page.rootElementId]) {
+        throw new GraphError(`Dangling page root ${page?.rootElementId ?? "(missing)"}`);
+      }
+    }
+  }
   var FlatStore = class {
     state;
     constructor() {
-      this.state = {
-        byId: /* @__PURE__ */ new Map(),
-        childrenByParent: /* @__PURE__ */ new Map(),
-        parentByChild: /* @__PURE__ */ new Map(),
-        pages: [],
-        activePageId: ""
-      };
+      this.state = emptyState();
     }
-    /**
-     * 注册或更新元素
-     */
     setElement(el) {
       this.state.byId.set(el.id, el);
     }
-    /**
-     * 获取单个元素
-     */
     getElement(id) {
       return this.state.byId.get(id);
     }
-    /**
-     * 获取父级元素
-     */
     getParent(id) {
       const parentId = this.state.parentByChild.get(id);
       return parentId ? this.state.byId.get(parentId) : void 0;
     }
-    /**
-     * 获取直接子节点列表
-     */
     getChildren(id) {
       const childIds = this.state.childrenByParent.get(id) ?? [];
       return childIds.map((cid) => this.state.byId.get(cid)).filter(Boolean);
     }
-    /**
-     * 建立父子关联
-     */
     attachChild(parentId, childId, index) {
+      if (!this.state.byId.has(parentId)) {
+        throw new GraphError(`Parent not found: ${parentId}`);
+      }
+      if (!this.state.byId.has(childId)) {
+        throw new GraphError(`Child not found: ${childId}`);
+      }
       if (parentId === childId) {
         throw new Error(`Cannot attach element to itself: ${parentId}`);
       }
@@ -623,9 +674,6 @@ var OpenDesignerPreview = (() => {
       this.state.childrenByParent.set(parentId, siblings);
       this.state.parentByChild.set(childId, parentId);
     }
-    /**
-     * 检查 targetId 是否为 ancestorId 的后代节点（或自身）
-     */
     isDescendant(ancestorId, targetId) {
       if (ancestorId === targetId) return true;
       let current = targetId;
@@ -640,9 +688,6 @@ var OpenDesignerPreview = (() => {
       }
       return false;
     }
-    /**
-     * 移动节点层级并附带循环引用安全校验
-     */
     moveElement(elementId, newParentId, index) {
       if (!this.state.byId.has(elementId)) {
         throw new Error(`Element not found: ${elementId}`);
@@ -659,9 +704,6 @@ var OpenDesignerPreview = (() => {
       this.attachChild(newParentId, elementId, index);
       return true;
     }
-    /**
-     * 深度克隆以 rootId 为根的整棵子树，自动重新生成 UUID
-     */
     cloneSubtree(rootId, idGenerator = () => createId()) {
       const originalSubtree = this.getSubtree(rootId);
       if (originalSubtree.length === 0) {
@@ -677,7 +719,7 @@ var OpenDesignerPreview = (() => {
         const cloned = {
           ...el,
           id: newId,
-          props: JSON.parse(JSON.stringify(el.props)),
+          props: structuredClone(el.props),
           canvasRect: el.canvasRect ? { ...el.canvasRect } : void 0,
           sourceLocation: el.sourceLocation ? { ...el.sourceLocation } : void 0
         };
@@ -702,9 +744,6 @@ var OpenDesignerPreview = (() => {
         clonedElements
       };
     }
-    /**
-     * 移除元素及其在关系表中的关联
-     */
     removeElement(id) {
       const parentId = this.state.parentByChild.get(id);
       if (parentId) {
@@ -717,21 +756,31 @@ var OpenDesignerPreview = (() => {
         }
         this.state.parentByChild.delete(id);
       }
-      const children = this.state.childrenByParent.get(id) ?? [];
+      const children = [...this.state.childrenByParent.get(id) ?? []];
       for (const childId of children) {
         this.removeElement(childId);
       }
       this.state.childrenByParent.delete(id);
       this.state.byId.delete(id);
+      this.dropPagesForMissingRoots();
     }
-    /**
-     * 广度优先提取以 rootId 为根的整棵子树
-     */
+    dropPagesForMissingRoots() {
+      const remaining = this.state.pages.filter((page) => this.state.byId.has(page.rootElementId));
+      this.state.pages = remaining;
+      if (!remaining.some((page) => page.id === this.state.activePageId)) {
+        this.state.activePageId = remaining[0]?.id ?? "";
+      }
+    }
     getSubtree(rootId) {
       const result = [];
       const queue = [rootId];
+      const visited = /* @__PURE__ */ new Set();
       while (queue.length > 0) {
         const currentId = queue.shift();
+        if (visited.has(currentId)) {
+          throw new GraphError(`Cycle detected at ${currentId}`);
+        }
+        visited.add(currentId);
         const el = this.state.byId.get(currentId);
         if (!el) continue;
         result.push(el);
@@ -740,9 +789,6 @@ var OpenDesignerPreview = (() => {
       }
       return result;
     }
-    /**
-     * 获取所有无父级的顶层根节点 ID
-     */
     getRootIds() {
       const rootIds = [];
       for (const id of this.state.byId.keys()) {
@@ -752,17 +798,17 @@ var OpenDesignerPreview = (() => {
       }
       return rootIds;
     }
-    /**
-     * 画布页面管理
-     */
     addPage(page) {
-      this.state.pages.push(page);
+      if (!this.state.byId.has(page.rootElementId)) {
+        throw new GraphError(`Dangling page root ${page.rootElementId}`);
+      }
+      this.state.pages.push({ ...page });
       if (!this.state.activePageId) {
         this.state.activePageId = page.id;
       }
     }
     getPages() {
-      return this.state.pages;
+      return this.state.pages.map((page) => ({ ...page }));
     }
     setActivePage(pageId) {
       this.state.activePageId = pageId;
@@ -770,27 +816,27 @@ var OpenDesignerPreview = (() => {
     getActivePageId() {
       return this.state.activePageId;
     }
-    /**
-     * 导出为 JSON 序列化对象（用于本地 .designer/canvas.json 存储）
-     */
     toJSON() {
-      return {
+      return structuredClone({
         byId: Object.fromEntries(this.state.byId),
         childrenByParent: Object.fromEntries(this.state.childrenByParent),
         parentByChild: Object.fromEntries(this.state.parentByChild),
         pages: this.state.pages,
         activePageId: this.state.activePageId
-      };
+      });
     }
-    /**
-     * 从 JSON 反序列化恢复 Store
-     */
     fromJSON(data) {
-      this.state.byId = new Map(Object.entries(data.byId || {}));
-      this.state.childrenByParent = new Map(Object.entries(data.childrenByParent || {}));
-      this.state.parentByChild = new Map(Object.entries(data.parentByChild || {}));
-      this.state.pages = data.pages || [];
-      this.state.activePageId = data.activePageId || "";
+      const cloned = structuredClone(data ?? {});
+      if (!cloned.byId) cloned.byId = {};
+      if (!cloned.childrenByParent) cloned.childrenByParent = {};
+      if (!cloned.parentByChild) cloned.parentByChild = {};
+      if (!cloned.pages) cloned.pages = [];
+      assertValidGraph(cloned);
+      this.state.byId = new Map(Object.entries(cloned.byId));
+      this.state.childrenByParent = new Map(Object.entries(cloned.childrenByParent));
+      this.state.parentByChild = new Map(Object.entries(cloned.parentByChild));
+      this.state.pages = cloned.pages;
+      this.state.activePageId = cloned.activePageId || "";
     }
   };
 
@@ -1303,6 +1349,127 @@ var OpenDesignerPreview = (() => {
   var Geist_Mono = createGoogleFontStub("Geist_Mono", "--font-geist-mono");
 
   // src/client/sandbox.ts
+  var SANDBOX_CSP = "default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'";
+  var ALLOWED_TAGS = /* @__PURE__ */ new Set([
+    "a",
+    "abbr",
+    "article",
+    "aside",
+    "b",
+    "blockquote",
+    "br",
+    "button",
+    "caption",
+    "code",
+    "div",
+    "em",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "i",
+    "img",
+    "input",
+    "label",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "span",
+    "strong",
+    "table",
+    "tbody",
+    "td",
+    "textarea",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+    "svg",
+    "path",
+    "circle",
+    "rect",
+    "g",
+    "line",
+    "polyline",
+    "polygon"
+  ]);
+  var ALLOWED_ATTRS = /* @__PURE__ */ new Set([
+    "alt",
+    "class",
+    "className",
+    "colspan",
+    "disabled",
+    "fill",
+    "for",
+    "height",
+    "href",
+    "id",
+    "name",
+    "placeholder",
+    "rel",
+    "role",
+    "rowspan",
+    "src",
+    "stroke",
+    "stroke-width",
+    "style",
+    "target",
+    "title",
+    "type",
+    "value",
+    "viewBox",
+    "width",
+    "xmlns",
+    "d",
+    "cx",
+    "cy",
+    "r",
+    "x",
+    "y",
+    "x1",
+    "x2",
+    "y1",
+    "y2"
+  ]);
+  function isAllowedAttr(name) {
+    if (name.startsWith("on")) return false;
+    if (name.startsWith("data-")) return true;
+    if (name.startsWith("aria-")) return true;
+    return ALLOWED_ATTRS.has(name);
+  }
+  function isAllowedUrl(value) {
+    const trimmed = value.trim();
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith("javascript:")) return false;
+    if (lower.startsWith("vbscript:")) return false;
+    if (lower.startsWith("data:text/html")) return false;
+    if (lower.startsWith("data:image/")) return true;
+    if (lower.startsWith("https:")) return true;
+    if (lower.startsWith("http:")) return true;
+    if (lower.startsWith("mailto:")) return true;
+    if (trimmed.startsWith("/") || trimmed.startsWith("#") || trimmed.startsWith(".")) return true;
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return true;
+    return false;
+  }
+  function wrapSandboxSrcdoc(inner) {
+    return `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"></head><body style="margin:0;background:transparent;">${inner}</body></html>`;
+  }
+  function sandboxIframeMarkup(inner) {
+    const srcdoc = wrapSandboxSrcdoc(inner).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    return `<iframe class="od-sandbox-frame" data-testid="component-sandbox" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${srcdoc}" style="border:0;width:100%;height:100%;pointer-events:none;background:transparent;position:absolute;inset:0;"></iframe>`;
+  }
   var ComponentSandbox = class {
     activePath;
     nextShims;
@@ -1318,9 +1485,6 @@ var OpenDesignerPreview = (() => {
     getShims() {
       return this.nextShims;
     }
-    /**
-     * 将 FlatStore 节点递归渲染为安全虚拟 DOM 结构
-     */
     renderElement(store, elementId, parentRect) {
       const el = store.getElement(elementId);
       if (!el) return "";
@@ -1340,17 +1504,17 @@ var OpenDesignerPreview = (() => {
       if (el.tag === "Image" || el.tag === "next/image") {
         const shim = this.nextShims.Image({
           src: finalProps.src || "/placeholder.svg",
-          alt: finalProps.alt || "",
+          alt: String(finalProps.alt || ""),
           width: finalProps.width,
           height: finalProps.height,
-          fill: finalProps.fill,
+          fill: Boolean(finalProps.fill),
           className: finalProps.className
         });
         finalTag = shim.type;
         Object.assign(finalProps, shim.props, { "data-next-image": "true" });
       } else if (el.tag === "Link" || el.tag === "next/link") {
         const shim = this.nextShims.Link({
-          href: finalProps.href || "#",
+          href: String(finalProps.href || "#"),
           className: finalProps.className
         });
         finalTag = shim.type;
@@ -1371,9 +1535,6 @@ var OpenDesignerPreview = (() => {
         children: renderedChildren
       };
     }
-    /**
-     * Map world canvasRect onto a positioned node. Nested children use parent-relative left/top.
-     */
     applyCanvasRectStyle(props, rect, parentRect) {
       const left = parentRect ? rect.left - parentRect.left : rect.left;
       const top = parentRect ? rect.top - parentRect.top : rect.top;
@@ -1396,15 +1557,12 @@ var OpenDesignerPreview = (() => {
       }
       props.style = layout;
     }
-    /**
-     * 将虚拟渲染节点转换为 HTML 字符串（可直接注入 iframe 或 shadow DOM）
-     */
     renderToHtml(store, rootId) {
       try {
         const node = this.renderElement(store, rootId);
         return this.nodeToHtmlString(node);
       } catch (err) {
-        return this.renderErrorFallback(err);
+        return this.renderErrorFallback(err instanceof Error ? err : new Error(String(err)));
       }
     }
     nodeToHtmlString(node) {
@@ -1412,19 +1570,23 @@ var OpenDesignerPreview = (() => {
         return this.escapeHtml(node);
       }
       const { tag, props, children } = node;
-      const safeTag = /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tag) ? tag : "div";
+      const rawTag = /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tag) ? tag : "div";
+      const safeTag = ALLOWED_TAGS.has(rawTag.toLowerCase()) ? rawTag : "div";
       const attrs = Object.entries(props).map(([k, v]) => {
         if (typeof v === "function") return "";
         if (k === "children") return "";
+        if (!isAllowedAttr(k)) return "";
         const attrName = k === "className" ? "class" : k;
         if (k === "style" && typeof v === "object" && v !== null) {
           const css = Object.entries(v).map(([sk, sv]) => `${sk.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}:${sv}`).join(";");
           return `style="${this.escapeHtml(css)}"`;
         }
-        if (typeof v === "string") return `${attrName}="${this.escapeHtml(v)}"`;
         if (typeof v === "boolean") return v ? attrName : "";
-        if (typeof v === "number") return `${attrName}="${v}"`;
-        return `${attrName}="${this.escapeHtml(JSON.stringify(v))}"`;
+        let text = typeof v === "string" ? v : typeof v === "number" ? String(v) : JSON.stringify(v);
+        if ((attrName === "href" || attrName === "src" || attrName === "xlink:href") && !isAllowedUrl(text)) {
+          return "";
+        }
+        return `${attrName}="${this.escapeHtml(text)}"`;
       }).filter(Boolean).join(" ");
       const attrStr = attrs ? ` ${attrs}` : "";
       const selfClosingTags = /* @__PURE__ */ new Set(["img", "input", "br", "hr", "meta", "link"]);
@@ -1437,13 +1599,10 @@ var OpenDesignerPreview = (() => {
     escapeHtml(str) {
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
     }
-    /**
-     * 优雅错误边界回退渲染
-     */
     renderErrorFallback(error) {
       return `
       <div style="padding: 16px; border: 1px solid #ef4444; background: #fef2f2; color: #991b1b; border-radius: 8px; font-family: sans-serif;">
-        <div style="font-weight: bold; margin-bottom: 4px;">\u26A0\uFE0F \u6C99\u7BB1\u6E32\u67D3\u9694\u79BB\u4FDD\u62A4</div>
+        <div style="font-weight: bold; margin-bottom: 4px;">Sandbox render isolation</div>
         <div style="font-size: 13px;">${this.escapeHtml(error.message || String(error))}</div>
       </div>
     `.trim();
@@ -1506,8 +1665,12 @@ var OpenDesignerPreview = (() => {
     if (/^bg-/.test(baseToken)) {
       return `${prefix}bg-color`;
     }
-    if (/^rounded-(t|b|l|r|tl|tr|bl|br)(-.*)?$/.test(baseToken)) {
-      const side = baseToken.match(/^rounded-(t|b|l|r|tl|tr|bl|br)/)[1];
+    if (/^rounded-(tl|tr|bl|br|ss|se|ee|es|s|e)(-.*)?$/.test(baseToken)) {
+      const corner = baseToken.match(/^rounded-(tl|tr|bl|br|ss|se|ee|es|s|e)/)[1];
+      return `${prefix}rounded-${corner}`;
+    }
+    if (/^rounded-(t|b|l|r)(-.*)?$/.test(baseToken)) {
+      const side = baseToken.match(/^rounded-(t|b|l|r)/)[1];
       return `${prefix}rounded-${side}`;
     }
     if (/^rounded(-.*)?$/.test(baseToken)) {
@@ -1529,6 +1692,10 @@ var OpenDesignerPreview = (() => {
     if (/^border(-\d+|-\[\d+[^\]]*\])?$/.test(baseToken)) {
       return `${prefix}border-width`;
     }
+    if (/^border-(t|b|l|r)-/.test(baseToken)) {
+      const side = baseToken.match(/^border-(t|b|l|r)/)[1];
+      return `${prefix}border-color-${side}`;
+    }
     if (/^border-/.test(baseToken)) {
       return `${prefix}border-color`;
     }
@@ -1545,8 +1712,14 @@ var OpenDesignerPreview = (() => {
     if (/^max-h-/.test(baseToken)) return `${prefix}max-h`;
     if (/^flex-(row|row-reverse|col|col-reverse)$/.test(baseToken)) return `${prefix}flex-direction`;
     if (/^flex-(wrap|wrap-reverse|nowrap)$/.test(baseToken)) return `${prefix}flex-wrap`;
-    if (/^flex-(1|auto|initial|none)$/.test(baseToken) || /^grow(-.*)?$/.test(baseToken) || /^shrink(-.*)?$/.test(baseToken)) {
-      return `${prefix}flex-grow-shrink`;
+    if (/^flex-(1|auto|initial|none)$/.test(baseToken)) {
+      return `${prefix}flex-size`;
+    }
+    if (/^grow(-.*)?$/.test(baseToken)) {
+      return `${prefix}flex-grow`;
+    }
+    if (/^shrink(-.*)?$/.test(baseToken)) {
+      return `${prefix}flex-shrink`;
     }
     if (/^(block|inline-block|inline|flex|inline-flex|grid|inline-grid|hidden)$/.test(baseToken)) {
       return `${prefix}display`;
@@ -2062,7 +2235,7 @@ var OpenDesignerPreview = (() => {
       return [
         `<div class="opendesigner-canvas-container" data-testid="canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
         `  <div class="canvas-viewport-layer" data-testid="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;width:100%;height:100%;">`,
-        `    ${elementsHtml.join("\n    ")}`,
+        `    ${sandboxIframeMarkup(elementsHtml.join("\n    "))}`,
         `    <div class="canvas-overlay-host" data-testid="canvas-overlay" style="pointer-events:none;position:absolute;inset:0;">${overlaySvg}</div>`,
         `  </div>`,
         `</div>`
@@ -2083,8 +2256,10 @@ var OpenDesignerPreview = (() => {
     return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || target.isContentEditable;
   }
   function applyRectsToDom(canvasEl, panel, store) {
+    const iframe = canvasEl.querySelector("iframe.od-sandbox-frame");
+    const scope = iframe?.contentDocument?.body ?? canvasEl;
     for (const [id, rect] of panel.getAllElementRects()) {
-      const node = canvasEl.querySelector(`[data-element-id="${CSS.escape(id)}"]`);
+      const node = scope.querySelector(`[data-element-id="${CSS.escape(id)}"]`);
       if (!node) continue;
       const parent = store.getParent(id);
       const parentRect = parent?.canvasRect;
@@ -2360,6 +2535,9 @@ var OpenDesignerPreview = (() => {
   }
 
   // src/client/previewApp.ts
+  function autosaveClearsDirty(httpOk, result) {
+    return httpOk && result?.success !== false;
+  }
   var CARD_ID = "hero-card";
   var BADGE_ID = "status-badge";
   var TITLE_ID = "hero-title";
@@ -2370,6 +2548,7 @@ var OpenDesignerPreview = (() => {
   var TEXT_SWATCHES = ["slate-100", "amber-300", "rose-400", "emerald-400"];
   var RADIUS_VALUES = ["none", "md", "xl", "full"];
   var PADDING_VALUES = ["2", "4", "6", "8"];
+  var SHADOW_VALUES = ["none", "sm", "md", "lg"];
   function seedStore(store) {
     store.setElement({
       id: CARD_ID,
@@ -2404,7 +2583,7 @@ var OpenDesignerPreview = (() => {
       type: "element",
       tag: "p",
       props: { className: "text-xs text-slate-400 mt-2 leading-relaxed" },
-      textContent: "Code is the canvas. Style edits update the live className with deterministic Tailwind slot merge.",
+      textContent: "Select a region. State intent. Accept or reject. Apply writes real file diffs, not only canvas.json.",
       canvasRect: { left: 76, top: 136, width: 320, height: 48 }
     });
     store.setElement({
@@ -2415,7 +2594,7 @@ var OpenDesignerPreview = (() => {
         className: "mt-4 px-4 py-2 bg-indigo-600 text-white text-xs font-semibold rounded-lg",
         "data-testid": "primary-btn"
       },
-      textContent: "Build",
+      textContent: "Pay now",
       canvasRect: { left: 76, top: 200, width: 88, height: 32 }
     });
     store.attachChild(CARD_ID, BADGE_ID);
@@ -2438,9 +2617,13 @@ var OpenDesignerPreview = (() => {
   function listElementIds(store) {
     return Object.keys(store.toJSON().byId);
   }
+  function extractClassName(code) {
+    const match = code.match(/className="([^"]*)"/);
+    return match ? match[1] : null;
+  }
   function swatchButtons(prefix, values, kind) {
     return values.map((value) => {
-      const colorClass = kind === "bg" ? `bg-${value}` : `bg-${value}`;
+      const colorClass = `bg-${value}`;
       return `<button type="button" class="od-swatch ${colorClass}" data-testid="${prefix}-${value}" data-value="${value}" data-tooltip="${kind === "bg" ? "Fill" : "Text"} ${value}"></button>`;
     }).join("");
   }
@@ -2449,6 +2632,11 @@ var OpenDesignerPreview = (() => {
     const panel = new CanvasPanel({ store, handleSize: 12 });
     let dirty = false;
     let openBatchId = null;
+    let lastSeenVersion = 0;
+    let projectId = null;
+    let proposal = null;
+    let hasLiveModel = false;
+    let fileDiffCount = 0;
     function syncGeometry() {
       panel.clearRegisteredRects();
       for (const [id, el] of Object.entries(store.toJSON().byId)) {
@@ -2465,7 +2653,7 @@ var OpenDesignerPreview = (() => {
       <header class="od-header">
         <div>
           <div class="od-title">dsh-opendesigner</div>
-          <div class="od-sub">DeepSeek Harness plugin preview</div>
+          <div class="od-sub">Select a region, state intent, accept or reject. Apply is a file diff.</div>
         </div>
         <div id="od-status" class="od-status" data-testid="plugin-status">loading status</div>
       </header>
@@ -2485,29 +2673,36 @@ var OpenDesignerPreview = (() => {
           <section class="od-canvas" id="od-canvas" data-testid="canvas-surface"></section>
         </div>
         <aside class="od-styles">
-          <div class="od-styles-title">Styles</div>
+          <div class="od-styles-title">Styles (local)</div>
           <div id="od-selected" class="od-mono" data-testid="selected-id"></div>
           <div id="od-inspector" class="od-inspector" data-testid="styles-inspector"></div>
           <div class="od-actions">
-            <button type="button" data-testid="edit-fill" id="od-edit-fill" data-tooltip="Fill emerald shortcut">Fill emerald</button>
-            <button type="button" data-testid="edit-radius" id="od-edit-radius" data-tooltip="Radius xl shortcut">Radius xl</button>
-            <button type="button" data-testid="ai-merge" id="od-ai-merge" data-tooltip="AI merge: live providers only (OpenRouter MiniMax free \u2192 MiniMax CN \u2192 Gemini \u2192 DeepSeek \u2192 OpenAI)">AI merge</button>
+            <button type="button" data-testid="edit-fill" id="od-edit-fill" data-tooltip="Local fill emerald">Fill emerald</button>
+            <button type="button" data-testid="edit-radius" id="od-edit-radius" data-tooltip="Local radius xl">Radius xl</button>
+            <button type="button" data-testid="edit-shadow" id="od-edit-shadow" data-tooltip="Local shadow-lg">Shadow lg</button>
+          </div>
+          <div class="od-styles-title">Intent (zh/en)</div>
+          <textarea id="od-intent" class="od-intent" data-testid="ai-intent" rows="3" placeholder="\u4F8B\u5982\uFF1A\u628A\u6309\u94AE\u6539\u6210\u7FE0\u7EFF / make the button emerald"></textarea>
+          <div class="od-actions">
+            <button type="button" data-testid="ai-propose" id="od-ai-propose" data-tooltip="Propose a scoped ChangeSet. Does not write until you accept.">\u63D0\u51FA\u4FEE\u6539</button>
+            <button type="button" data-testid="ai-accept" id="od-ai-accept" disabled data-tooltip="Accept the proposal and checkpoint">\u63A5\u53D7</button>
+            <button type="button" data-testid="ai-reject" id="od-ai-reject" disabled data-tooltip="Reject with no residue">\u62D2\u7EDD</button>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
           <div class="od-actions">
             <button type="button" data-testid="rewind" id="od-rewind" data-tooltip="Rewind one checkpoint">Rewind</button>
-            <button type="button" data-testid="apply-project" id="od-apply-project" data-tooltip="Save working copy to the project">Save / Apply to project</button>
+            <button type="button" data-testid="save-design" id="od-save-design" data-tooltip="Write .designer/canvas.json only">\u4FDD\u5B58\u8BBE\u8BA1\u7A3F</button>
+            <button type="button" data-testid="apply-files" id="od-apply-files" disabled data-tooltip="Apply real file diffs from the open agent batch">\u5E94\u7528\u5230\u5DE5\u7A0B</button>
           </div>
           <div class="od-styles-title">Agent batch</div>
           <div class="od-actions">
             <button type="button" data-testid="batch-create" id="od-batch-create" data-tooltip="Create an isolated agent worktree">Create batch</button>
             <button type="button" data-testid="batch-write" id="od-batch-write" data-tooltip="Write a jailed file inside the batch worktree">Write batch file</button>
-            <button type="button" data-testid="batch-apply" id="od-batch-apply" data-tooltip="Apply the agent worktree to the project">Apply batch</button>
             <button type="button" data-testid="batch-discard" id="od-batch-discard" data-tooltip="Discard the agent worktree">Discard batch</button>
           </div>
           <pre id="od-persist" class="od-mono" data-testid="persist-log">persistence idle</pre>
-          <pre id="od-ai-banner" class="od-mono" data-testid="ai-live-banner">AI merge: live-only (no mock)</pre>
+          <pre id="od-ai-banner" class="od-mono" data-testid="ai-live-banner">Model path: propose ChangeSet, then accept or reject</pre>
           <pre id="od-class" class="od-mono" data-testid="class-output"></pre>
           <pre id="od-ai" class="od-mono" data-testid="ai-output"></pre>
           <div class="od-styles-title">Stubs</div>
@@ -2528,8 +2723,20 @@ var OpenDesignerPreview = (() => {
     const inspectorEl = root.querySelector("#od-inspector");
     const hudEl = root.querySelector("#od-hud");
     const zoomLabelEl = root.querySelector("#od-zoom-label");
+    const intentEl = root.querySelector("#od-intent");
+    const proposeBtn = root.querySelector("#od-ai-propose");
+    const acceptBtn = root.querySelector("#od-ai-accept");
+    const rejectBtn = root.querySelector("#od-ai-reject");
+    const applyFilesBtn = root.querySelector("#od-apply-files");
     function selectedId() {
       return panel.selection.getSelectedIds()[0] || "";
+    }
+    function syncProposalButtons() {
+      acceptBtn.disabled = !proposal;
+      rejectBtn.disabled = !proposal;
+      applyFilesBtn.disabled = !openBatchId || fileDiffCount === 0;
+      proposeBtn.disabled = !hasLiveModel;
+      proposeBtn.title = hasLiveModel ? "Propose a scoped ChangeSet" : "No live model configured. Local style edits still work.";
     }
     function updateHud() {
       const ids = panel.selection.getSelectedIds();
@@ -2543,14 +2750,11 @@ var OpenDesignerPreview = (() => {
     function renderInspector() {
       const id = selectedId();
       if (!id) {
-        inspectorEl.innerHTML = `<div class="od-hint">Select an element to edit fill, radius, padding, and text color.</div>`;
+        inspectorEl.innerHTML = `<div class="od-hint">Select an element to edit fill, radius, padding, text color, and shadow locally.</div>`;
         return;
       }
       const className = classNameOf(store, id);
       const parsed = StylesPanelManager.parseClasses(className);
-      const sections = StylesPanelManager.buildPanelSections(className);
-      const wanted = /* @__PURE__ */ new Set(["backgroundColor", "borderRadius", "padding", "textColor"]);
-      const present = sections.flatMap((section) => section.controls).filter((control) => wanted.has(control.name));
       inspectorEl.innerHTML = `
       <div class="od-field">
         <div class="od-field-label">Fill ${parsed.backgroundColor || ""}</div>
@@ -2568,7 +2772,10 @@ var OpenDesignerPreview = (() => {
         <div class="od-field-label">Text color ${parsed.textColor || ""}</div>
         <div class="od-swatches">${swatchButtons("style-text", TEXT_SWATCHES, "text")}</div>
       </div>
-      <div class="od-hint">${present.map((control) => control.name).join(" \xB7 ")}</div>
+      <div class="od-field">
+        <div class="od-field-label">Shadow</div>
+        <div class="od-chip-row">${SHADOW_VALUES.map((value) => `<button type="button" data-testid="style-shadow-${value}" data-shadow="${value}" data-tooltip="Local shadow ${value}">${value}</button>`).join("")}</div>
+      </div>
     `;
     }
     function renderLayers() {
@@ -2590,6 +2797,7 @@ var OpenDesignerPreview = (() => {
       selectedEl.textContent = id || "(none)";
       classEl.textContent = id ? classNameOf(store, id) : "";
       updateHud();
+      syncProposalButtons();
       if (options.preserveViewport) refreshOverlay(canvasEl, panel);
     }
     async function refreshStatus() {
@@ -2597,30 +2805,65 @@ var OpenDesignerPreview = (() => {
       const status = await api.getStatus();
       const persistence = status.persistence || {};
       const ai = status.ai || {};
-      statusEl.textContent = `plugin ${status.name} | jail ${status.projectRoot} | autoApprove=${status.autoApprove} | ai ${ai.provider || "none"}/${ai.model || "none"} mock=${ai.mockMode === true} hasApiKey=${ai.hasApiKey === true}`;
-      autosaveEl.textContent = `working copy ${persistence.lastAutosaveAt || "none"} | checkpoints ${persistence.checkpointCount ?? 0} | current ${persistence.currentCheckpointLabel || "none"}`;
+      projectId = typeof status.projectId === "string" ? status.projectId : projectId;
+      if (typeof status.storeVersion === "number") lastSeenVersion = status.storeVersion;
+      hasLiveModel = ai.hasApiKey === true && ai.mockMode !== true;
+      statusEl.textContent = `plugin ${status.name} | project ${projectId || "\u2014"} v${lastSeenVersion} | jail ${status.projectRoot} | ai ${ai.provider || "none"}/${ai.model || "none"} hasApiKey=${ai.hasApiKey === true}`;
+      autosaveEl.textContent = `working copy ${persistence.lastAutosaveAt || "none"} | checkpoints ${persistence.checkpointCount ?? 0} | current ${persistence.currentCheckpointLabel || "none"} | dirty=${dirty}`;
       openBatchId = typeof persistence.openBatchId === "string" ? persistence.openBatchId : null;
+      fileDiffCount = 0;
+      if (openBatchId && api.callTool) {
+        const diffs = await api.callTool("batch_preview", { batchId: openBatchId });
+        if (Array.isArray(diffs.diffs)) fileDiffCount = diffs.diffs.length;
+        else if (Array.isArray(diffs.copied)) fileDiffCount = diffs.copied.length;
+      }
+      syncProposalButtons();
+    }
+    async function pushAuthoritativeCanvas() {
+      if (!api.pushCanvas) return true;
+      const payload = {
+        ...store.toJSON(),
+        projectId,
+        version: lastSeenVersion + 1,
+        baseVersion: lastSeenVersion
+      };
+      try {
+        const result = await api.pushCanvas(payload);
+        if (result.success === false) {
+          persistEl.textContent = JSON.stringify(result, null, 2);
+          return false;
+        }
+        if (typeof result.version === "number") lastSeenVersion = result.version;
+        else lastSeenVersion += 1;
+        return true;
+      } catch (err) {
+        persistEl.textContent = `push failed: ${err instanceof Error ? err.message : String(err)}`;
+        return false;
+      }
     }
     async function callTool(tool, args = {}) {
       if (!api.callTool) {
         persistEl.textContent = "persistence API is not attached.";
         return { success: false, error: "no persistence API" };
       }
-      if (api.pushCanvas && (tool === "checkpoint" || tool === "autosave" || tool === "apply_to_project")) {
-        await api.pushCanvas(store.toJSON());
+      if (tool === "checkpoint" || tool === "autosave" || tool === "apply_to_project") {
+        const pushed = await pushAuthoritativeCanvas();
+        if (!pushed) return { success: false, error: "STALE_HYDRATE" };
       }
       const result = await api.callTool(tool, args);
       const shown = { ...result };
       if (shown.store) shown.store = { restored: true };
       persistEl.textContent = JSON.stringify(shown, null, 2);
+      if (typeof result.version === "number") lastSeenVersion = result.version;
       await refreshStatus();
       return result;
     }
     async function checkpointAndAutosave(label) {
       markDirty();
-      await callTool("checkpoint", { label, kind: "canvas" });
-      await callTool("autosave");
-      dirty = false;
+      const cp = await callTool("checkpoint", { label, kind: "canvas" });
+      if (cp.success === false) return;
+      const auto = await callTool("autosave");
+      if (autosaveClearsDirty(true, auto)) dirty = false;
     }
     function applyStyle(property, value, label) {
       const id = selectedId();
@@ -2629,6 +2872,15 @@ var OpenDesignerPreview = (() => {
       setClassName(store, id, next);
       render();
       void checkpointAndAutosave(label);
+    }
+    function applyLocalShadow(value) {
+      const id = selectedId() || CARD_ID;
+      if (!selectedId()) panel.select([id]);
+      const token = value === "none" ? "shadow-none" : `shadow-${value}`;
+      const next = mergeTailwindClasses(classNameOf(store, id), token);
+      setClassName(store, id, next);
+      render();
+      void checkpointAndAutosave(`shadow-${value}`);
     }
     function insertBox() {
       let n = 1;
@@ -2664,6 +2916,11 @@ var OpenDesignerPreview = (() => {
       refreshOverlay(canvasEl, panel);
       updateHud();
     }
+    function clearProposal(message) {
+      proposal = null;
+      aiEl.textContent = message;
+      syncProposalButtons();
+    }
     layersEl.addEventListener("click", (event) => {
       const target = event.target;
       const id = target.getAttribute("data-id");
@@ -2677,10 +2934,12 @@ var OpenDesignerPreview = (() => {
       const radius = target.getAttribute("data-radius");
       const padding = target.getAttribute("data-padding");
       const text = target.getAttribute("data-testid")?.startsWith("style-text-") ? target.getAttribute("data-value") : null;
+      const shadow = target.getAttribute("data-shadow");
       if (fill) applyStyle("backgroundColor", fill, `fill-${fill}`);
       else if (radius) applyStyle("borderRadius", radius, `radius-${radius}`);
       else if (padding) applyStyle("padding", padding, `padding-${padding}`);
       else if (text) applyStyle("textColor", text, `text-${text}`);
+      else if (shadow) applyLocalShadow(shadow);
     });
     root.querySelector("#od-edit-fill").addEventListener("click", () => {
       applyStyle("backgroundColor", "emerald-600", "fill-emerald");
@@ -2693,17 +2952,36 @@ var OpenDesignerPreview = (() => {
       render();
       void checkpointAndAutosave("radius-xl");
     });
+    root.querySelector("#od-edit-shadow").addEventListener("click", () => {
+      applyLocalShadow("lg");
+    });
     root.querySelector("#od-rewind").addEventListener("click", async () => {
       const result = await callTool("rewind");
       if (result.success && result.store) {
         store.fromJSON(result.store);
         const ids = listElementIds(store);
         panel.select(ids.includes(CARD_ID) ? [CARD_ID] : ids.slice(0, 1));
+        clearProposal("Rewound. No pending ChangeSet.");
         render();
       }
     });
-    root.querySelector("#od-apply-project").addEventListener("click", () => {
+    root.querySelector("#od-save-design").addEventListener("click", () => {
       void callTool("apply_to_project", { approve: true });
+    });
+    root.querySelector("#od-apply-files").addEventListener("click", async () => {
+      if (!openBatchId || fileDiffCount === 0) {
+        persistEl.textContent = JSON.stringify({
+          success: false,
+          error: "\u5E94\u7528\u5230\u5DE5\u7A0B needs an open batch with file diffs"
+        });
+        return;
+      }
+      const result = await callTool("batch_apply", { batchId: openBatchId, approve: true });
+      if (result.success === true) {
+        openBatchId = null;
+        fileDiffCount = 0;
+      }
+      syncProposalButtons();
     });
     root.querySelector("#od-batch-create").addEventListener("click", async () => {
       const result = await callTool("batch_create", { label: "preview-batch" });
@@ -2712,19 +2990,17 @@ var OpenDesignerPreview = (() => {
       }
     });
     root.querySelector("#od-batch-write").addEventListener("click", () => {
-      void callTool("project_write", {
-        path: BATCH_FILE,
-        content: "agent-batch isolation write\n",
-        approve: true
-      });
-    });
-    root.querySelector("#od-batch-apply").addEventListener("click", async () => {
       if (!openBatchId) {
-        persistEl.textContent = JSON.stringify({ success: false, error: "no open batch" });
+        persistEl.textContent = JSON.stringify({
+          success: false,
+          error: "Create an Agent batch before writing isolated file diffs"
+        });
         return;
       }
-      await callTool("batch_apply", { batchId: openBatchId, approve: true });
-      openBatchId = null;
+      void callTool("project_write_batch", {
+        files: [{ path: BATCH_FILE, content: "agent-batch isolation write\n" }],
+        approve: true
+      });
     });
     root.querySelector("#od-batch-discard").addEventListener("click", async () => {
       if (!openBatchId) {
@@ -2733,37 +3009,81 @@ var OpenDesignerPreview = (() => {
       }
       await callTool("batch_discard", { batchId: openBatchId });
       openBatchId = null;
+      fileDiffCount = 0;
+      syncProposalButtons();
     });
-    root.querySelector("#od-ai-merge").addEventListener("click", async () => {
+    proposeBtn.addEventListener("click", async () => {
+      if (!hasLiveModel) {
+        aiBannerEl.textContent = "Model path gated: no live provider. Use local style edits.";
+        aiEl.textContent = "\u63D0\u51FA\u4FEE\u6539 is disabled until a live model is configured.";
+        return;
+      }
       if (!api.applyAiMerge) {
         aiEl.textContent = "AI merge endpoint is not attached.";
         return;
       }
       const id = selectedId() || BTN_ID;
-      const source = `<button className="${classNameOf(store, id)}">${store.getElement(id)?.textContent || ""}</button>`;
-      const result = await api.applyAiMerge(source, "Add shadow-lg to the button className");
+      if (!selectedId()) panel.select([id]);
+      const instruction = intentEl.value.trim();
+      if (!instruction) {
+        aiEl.textContent = "Write an intent in zh or en before proposing.";
+        return;
+      }
+      const before = classNameOf(store, id);
+      const source = `<button className="${before}">${store.getElement(id)?.textContent || ""}</button>`;
+      const result = await api.applyAiMerge(source, instruction);
       const attempts = (result.attemptsLog || []).map((row) => `${row.label || row.provider} HTTP ${row.httpStatus ?? "err"} ${row.ok ? "ok" : "fail"}`).join("\n");
       if (result.success && result.mergedCode && result.fallback !== true && result.mockMode !== true) {
-        const match = result.mergedCode.match(/className="([^"]*)"/);
-        if (match) setClassName(store, id, match[1]);
-        const banner = `provider=${result.provider || "unknown"} model=${result.model || "unknown"} mock=false`;
-        aiBannerEl.textContent = banner;
-        aiEl.textContent = `${banner}
+        const after = extractClassName(result.mergedCode) || before;
+        proposal = {
+          id: `cs_${Date.now()}`,
+          instruction,
+          elementId: id,
+          beforeClassName: before,
+          afterClassName: after,
+          mergedCode: result.mergedCode
+        };
+        aiBannerEl.textContent = `proposal ready provider=${result.provider || "unknown"} model=${result.model || "unknown"}`;
+        aiEl.textContent = `${aiBannerEl.textContent}
+intent: ${instruction}
+before: ${before}
+after: ${after}
 ${attempts}
-${result.mergedCode}`;
-        render();
-        void checkpointAndAutosave("ai-merge");
-      } else if (result.success && result.fallback) {
-        aiBannerEl.textContent = `mock fallback (offline demo only) model=${result.model || "mock-offline"}`;
-        aiEl.textContent = `live failed: ${result.liveError || "provider error"}
-fallback=mock-offline
-${attempts}
-${result.mergedCode || ""}`;
-      } else {
-        aiBannerEl.textContent = "AI merge live failed (no mock)";
-        aiEl.textContent = `${result.error || "AI merge failed"}
-${attempts}`;
+Accept to apply. Reject to drop.`;
+        syncProposalButtons();
+        return;
       }
+      proposal = null;
+      syncProposalButtons();
+      if (result.success && result.fallback) {
+        aiBannerEl.textContent = "live failed; mock is not applied";
+        aiEl.textContent = `live failed: ${result.liveError || "provider error"}
+${attempts}`;
+        return;
+      }
+      aiBannerEl.textContent = "AI propose failed";
+      aiEl.textContent = `${result.error || "AI merge failed"}
+${attempts}`;
+    });
+    acceptBtn.addEventListener("click", () => {
+      if (!proposal) return;
+      setClassName(store, proposal.elementId, proposal.afterClassName);
+      const accepted = proposal;
+      proposal = null;
+      render();
+      void checkpointAndAutosave("changeset-accept");
+      aiEl.textContent = `Accepted ${accepted.id}. Rewind undoes it.`;
+      syncProposalButtons();
+    });
+    rejectBtn.addEventListener("click", () => {
+      if (!proposal) return;
+      const before = classNameOf(store, proposal.elementId);
+      clearProposal("Rejected. Store unchanged.");
+      if (before !== proposal?.beforeClassName) {
+      }
+      void before;
+      aiBannerEl.textContent = "ChangeSet rejected with no residue";
+      render();
     });
     root.querySelector("#od-insert-box").addEventListener("click", () => insertBox());
     root.querySelector("#od-delete-element").addEventListener("click", () => deleteSelected());
@@ -2791,8 +3111,10 @@ ${attempts}`;
     bindFloatingTooltips(root);
     window.setInterval(() => {
       if (!dirty) return;
-      dirty = false;
-      void callTool("autosave");
+      void (async () => {
+        const result = await callTool("autosave");
+        if (autosaveClearsDirty(true, result)) dirty = false;
+      })();
     }, 8e3);
     void (async () => {
       if (!api.getStatus) {
@@ -2808,6 +3130,8 @@ ${attempts}`;
           const canvas = await api.getCanvas();
           if (canvas && canvas.byId && Object.keys(canvas.byId).length > 0) {
             store.fromJSON(canvas);
+            if (typeof canvas.version === "number") lastSeenVersion = canvas.version;
+            if (typeof canvas.projectId === "string") projectId = canvas.projectId;
             restored = true;
           }
         }
@@ -2834,18 +3158,23 @@ ${attempts}`;
       mountPreview(host, {
         getStatus: async () => {
           const res = await fetch("/api/status");
+          if (!res.ok) throw new Error(`status HTTP ${res.status}`);
           return await res.json();
         },
         getCanvas: async () => {
           const res = await fetch("/api/canvas");
+          if (!res.ok) throw new Error(`canvas HTTP ${res.status}`);
           return await res.json();
         },
         pushCanvas: async (canvas) => {
-          await fetch("/api/canvas", {
+          const res = await fetch("/api/canvas", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(canvas)
           });
+          const body = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }));
+          if (!res.ok) return { success: false, error: body.error || `HTTP ${res.status}` };
+          return body;
         },
         callTool: async (tool, args = {}) => {
           const res = await fetch("/api/tool", {
@@ -2853,6 +3182,7 @@ ${attempts}`;
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tool, args })
           });
+          if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
           return await res.json();
         },
         applyAiMerge: async (source, instruction) => {
@@ -2861,6 +3191,7 @@ ${attempts}`;
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sourceCode: source, instruction })
           });
+          if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
           return await res.json();
         }
       });

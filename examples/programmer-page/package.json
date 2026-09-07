@@ -1,0 +1,6 @@
+{
+  "name": "programmer-page",
+  "private": true,
+  "description": "Sample React + Tailwind page for OpenDesigner preview. Open with OPENDESIGNER_PROJECT_ROOT or npm run preview.",
+  "type": "module"
+}
