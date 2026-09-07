@@ -1,0 +1,152 @@
+{
+  "date": "2026-09-07",
+  "baseSha": "1170dfaf55d73b4d49135972ede90d6627f14b67",
+  "northStar": "A programmer with an existing React+Tailwind page can select a region, state intent (zh/en), see a proposal, reject with no residue, or accept with undo, without corrupting business logic or silently overwriting user edits.",
+  "gate": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-2026-09-07/qa/*.test.mjs",
+  "findings": [
+    {
+      "id": "OD-01",
+      "severity": "P0",
+      "title": "agentBatchApply silently overwrites uncommitted user edits",
+      "fixDirection": "Validate baseRef and content hashes before any write. Refuse the whole batch on conflict. Do not copy over a main-tree file that diverged from baseRef unless it already matches the worktree.",
+      "acceptance": "A concurrent user edit of a batch-touched file makes apply fail with BATCH_CONFLICT and leaves the user bytes intact (R09). Dirty trees are rejected at create or folded into the batch base (R08).",
+      "qa": ["R08", "R09"]
+    },
+    {
+      "id": "OD-02",
+      "severity": "P0",
+      "title": "Non-atomic apply; missed committed Agent changes; rename and Chinese paths",
+      "fixDirection": "Diff against baseRef plus the live worktree using git -z. Include committed worktree changes. Treat rename as delete+write. Apply through a recoverable transaction that rolls back earlier files if a later write fails.",
+      "acceptance": "Committed worktree files appear on apply (R10). A staged rename removes the old name (R11). A Chinese filename applies without JSON.parse of Git quotes (R12). Failure on a later file restores the earlier file (R17). Unchanged-root new batch files still apply (CONTROL).",
+      "qa": ["CONTROL-batch-new-file", "R10", "R11", "R12", "R17"]
+    },
+    {
+      "id": "OD-03",
+      "severity": "P0",
+      "title": "Checkpoint shared refs pollute Rewind",
+      "fixDirection": "Deep-copy store and source overlay on push, rewind, and fromJSON. History must not alias live nodes.",
+      "acceptance": "Mutating a live node after push leaves the stored checkpoint unchanged (R02). fromJSON must not alias the object that was passed in (R03).",
+      "qa": ["R02", "R03"]
+    },
+    {
+      "id": "OD-04",
+      "severity": "P1",
+      "title": "Source undo missing before-image and create-delete tombstone",
+      "fixDirection": "On first touch, capture the original bytes or a null tombstone. Checkpoints store the full session overlay including deletions. Rewind restores writes and deletes.",
+      "acceptance": "Creating a file then rewind removes it. Deleting a pre-existing file then rewind restores it. npm test covers this path.",
+      "qa": ["npm-test-source-undo"]
+    },
+    {
+      "id": "OD-05",
+      "severity": "P0",
+      "title": "pathJail symlink escape",
+      "fixDirection": "realpath the existing prefix, then jail against the real project root. Reject any path whose real location is outside the root.",
+      "acceptance": "../ is rejected and in-root paths resolve (CONTROL pathJail). A symlink that points outside the project cannot be used to read or write outside the root (R01).",
+      "qa": ["CONTROL-pathJail", "R01"]
+    },
+    {
+      "id": "OD-06",
+      "severity": "P0",
+      "title": "approve:true from the model is not authorization",
+      "fixDirection": "Deny destructive tools by default. Honor approve only on a trusted host/UI channel. autoApprove remains an operator setting. Ignore model-supplied approve.",
+      "acceptance": "executeTool from the model channel with approve:true is denied. Preview /api/tool is the host channel. npm test covers both.",
+      "qa": ["npm-test-approval-channel"]
+    },
+    {
+      "id": "OD-07",
+      "severity": "P1",
+      "title": "Three split states (preview / plugin / FlatStore)",
+      "fixDirection": "One ProjectRuntime with projectId and version shared by UI and Agent. Hydrate refuses a stale whole-canvas overwrite. Preview opens a real project path, not only test-fixtures.",
+      "acceptance": "status() and canvas JSON share projectId/version. POST /api/canvas with an older version is rejected. npm run preview binds OPENDESIGNER_PROJECT_ROOT or examples/programmer-page.",
+      "qa": ["npm-test-runtime"]
+    },
+    {
+      "id": "OD-08",
+      "severity": "P1",
+      "title": "applyToProject only writes canvas.json",
+      "fixDirection": "Split labels. 保存设计稿 writes the working copy. 应用到工程 runs only when real file diffs are shown and applied through the conflict-checked transaction.",
+      "acceptance": "The preview no longer labels canvas-only save as Apply. 应用到工程 is disabled when there are no file diffs.",
+      "qa": ["ui-preview"]
+    },
+    {
+      "id": "OD-09",
+      "severity": "P1",
+      "title": "AI UX hardcodes Add shadow-lg",
+      "fixDirection": "Remove the demo instruction. Shadow/color/drag stay local ops. Model path proposes a scoped ChangeSet. Accept applies with a checkpoint. Reject leaves no residue. Gate the model button when no live provider is configured.",
+      "acceptance": "The preview does not call AI with Add shadow-lg to the button className. Propose/accept/reject is visible. A gated button is disabled rather than lying.",
+      "qa": ["ui-preview"]
+    },
+    {
+      "id": "OD-10",
+      "severity": "P1",
+      "title": "Autosave failure clears dirty",
+      "fixDirection": "Require Response.ok and result.success. Keep dirty on failure so the next tick retries.",
+      "acceptance": "A failed autosave leaves dirty true. A successful autosave clears it.",
+      "qa": ["npm-test-autosave-dirty"]
+    },
+    {
+      "id": "OD-11",
+      "severity": "P1",
+      "title": "Claim release deletes a newer index; parent and child can both be live",
+      "fixDirection": "Release only clears the element index when it still points at that claim. Claiming an ancestor or descendant of a live claim is a conflict.",
+      "acceptance": "Releasing an expired claim does not erase a newer live lock (R13). Ancestor and descendant cannot be claimed by two owners (R14). A second claim on the same element is still rejected (CONTROL).",
+      "qa": ["CONTROL-claim", "R13", "R14"]
+    },
+    {
+      "id": "OD-12",
+      "severity": "P1",
+      "title": "Document graph missing validation",
+      "fixDirection": "Reject missing parents, cycles, and dangling page roots on attach, hydrate, and delete.",
+      "acceptance": "Attaching to an absent parent fails without corrupting the tree (R04). Cyclic hydrate is rejected before traversal (R15). Deleting a page root drops that page metadata (R16).",
+      "qa": ["R04", "R15", "R16"]
+    },
+    {
+      "id": "OD-13",
+      "severity": "P1",
+      "title": "jsx-svg is treated as visual proof",
+      "fixDirection": "Bind take_screenshot to a real sandbox HTML render. jsx-svg never records verification.",
+      "acceptance": "screenshotMode jsx-svg returns kind jsx-svg and visualProof false and does not unlock a mutated claim. html-render is bound to ComponentSandbox output.",
+      "qa": ["npm-test-screenshot"]
+    },
+    {
+      "id": "OD-14",
+      "severity": "P1",
+      "title": "Adding grow deletes shrink-0",
+      "fixDirection": "Give flex grow and shrink distinct Tailwind slots. flex-1/auto/none stay a third slot.",
+      "acceptance": "Adding grow preserves independent shrink-0 (R05).",
+      "qa": ["R05"]
+    },
+    {
+      "id": "OD-15",
+      "severity": "P1",
+      "title": "Upper-left and upper-right radius collapse",
+      "fixDirection": "Match rounded-tl/tr/bl/br before rounded-t/b/l/r so each corner is its own slot.",
+      "acceptance": "rounded-tl-md and rounded-tr-xl coexist (R06).",
+      "qa": ["R06"]
+    },
+    {
+      "id": "OD-16",
+      "severity": "P1",
+      "title": "Left border color dies when right border color is edited",
+      "fixDirection": "Slot border-l/r/t/b colors separately from each other and from widths.",
+      "acceptance": "border-l-red-500 survives adding border-r-blue-500 (R07).",
+      "qa": ["R07"]
+    },
+    {
+      "id": "OD-17",
+      "severity": "P1",
+      "title": "Tailwind merge false-deletes independent tokens",
+      "fixDirection": "Same slot table as OD-14..16. Do not treat unrelated prefixes as one category.",
+      "acceptance": "R05, R06, and R07 stay green together. Deterministic className edits do not drop sibling tokens.",
+      "qa": ["R05", "R06", "R07"]
+    },
+    {
+      "id": "OD-18",
+      "severity": "P1",
+      "title": "ComponentSandbox is not a sandbox",
+      "fixDirection": "Allowlist tags, attributes, and URL protocols. Render canvas HTML inside an iframe with CSP. Serve only preview.html, preview/, and lib/ from the preview server.",
+      "acceptance": "javascript: href is stripped. iframe+CSP wraps canvas HTML. Paths under src/ are 403 from the preview server.",
+      "qa": ["npm-test-sandbox", "ui-preview"]
+    }
+  ]
+}
