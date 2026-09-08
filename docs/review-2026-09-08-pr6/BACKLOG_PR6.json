@@ -1,0 +1,33 @@
+{
+  "head": "de41f0164999a47f2968edf99f20b9bd1d8adfd6",
+  "base": "bf3abd72a09c09d6b3cab413984637a02bc8afbe",
+  "new_regressions": [
+    {
+      "id": "PR6-R01",
+      "priority": "P0",
+      "title": "混合恢复批次覆盖已识别的用户修复",
+      "related": ["PR4-R2-03", "harsh G05"],
+      "introducedBy": 6,
+      "location": "src/server/applyJournal.ts:190-237",
+      "tests": ["F01"],
+      "evidence": "same test base PASS / PR6 FAIL",
+      "observed": "a=USER_REPAIR_A and b=AGENT_B; recover returns recovered:true, rewrites a=BASE_A and b=BASE_B, clears journal.",
+      "fix": "先形成逐文件恢复计划。混合存在未知/用户修改时禁止退回全量备份循环；默认全批阻断并保留现场。",
+      "acceptance": "任一文件的第三方修改不被覆盖；混合和多文件两种顺序均验收；成功回执准确，证据不被提前清除。"
+    },
+    {
+      "id": "PR6-R02",
+      "priority": "P0",
+      "title": "用备份长度推断完整用户修复，误清半写入和不可读状态日志",
+      "related": ["PR4-R2-03", "harsh G05", "harsh G08", "harsh B06"],
+      "introducedBy": 6,
+      "location": "src/server/applyJournal.ts:196-223,330-341",
+      "tests": ["F02", "F03", "F04"],
+      "evidence": "all same tests base PASS / PR6 FAIL",
+      "observed": "before=x, candidate 22 bytes, partial first 8 bytes -> preserved:true with journal removed. New file partial NEW_ -> same. File replaced by directory -> same.",
+      "fix": "文件长度/第三个hash不能证明修改来源和写入完整性。目标不可读/类型改变必须阻断。与before/after均不一致时默认保留字节、journal和备份。",
+      "acceptance": "新增文件、旧文件变长后的部分写入、同长破损、不可读目标都保留现场。"
+    }
+  ],
+  "note": "Keep B01 pin; fix R01/R02; MAIN-01..04 remain required on this PR."
+}
