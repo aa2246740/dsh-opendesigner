@@ -139,7 +139,7 @@ export class ApplyJournal {
     };
   }
 
-  public async recover(): Promise<{ recovered: boolean; blocked?: boolean }> {
+  public async recover(): Promise<{ recovered: boolean; blocked?: boolean; preserved?: boolean }> {
     const journal = await this.load();
     if (!journal) return { recovered: false };
     if (journal.phase === "committed") {
@@ -159,6 +159,7 @@ export class ApplyJournal {
       const plannedByRel = new Map(journal.planned.map((op) => [op.rel, op]));
       const classified: Array<{
         rel: string;
+        kind: "write" | "delete";
         beforeHash: string | null | undefined;
         afterHash: string | null | undefined;
         backupRel: string | null;
@@ -168,6 +169,7 @@ export class ApplyJournal {
         const planned = plannedByRel.get(item.rel);
         classified.push({
           rel: item.rel,
+          kind: planned?.kind ?? "write",
           beforeHash: hashField(item.beforeHash) ? item.beforeHash : planned?.beforeHash,
           afterHash: hashField(item.afterHash) ? item.afterHash : planned?.afterHash,
           backupRel: item.backupRel
@@ -178,23 +180,47 @@ export class ApplyJournal {
         if (seen.has(op.rel)) continue;
         classified.push({
           rel: op.rel,
+          kind: op.kind,
           beforeHash: op.beforeHash,
           afterHash: op.afterHash,
           backupRel: null
         });
       }
 
+      let anyRestore = false;
+      let anyPreserve = false;
       for (const item of classified) {
         if (!hashField(item.beforeHash) || !hashField(item.afterHash)) {
           await this.block(journal, `Recovery blocked: journal for ${item.rel} is missing before/after hashes.`);
         }
         const current = await readPresence(resolveProjectPath(this.projectRoot, item.rel));
         const now = fingerprintPresence(current);
-        if (now === item.afterHash || now === item.beforeHash) continue;
-        await this.block(
-          journal,
-          `Recovery blocked: ${item.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
+        if (now === item.afterHash || now === item.beforeHash) {
+          anyRestore = true;
+          continue;
+        }
+        if (item.kind === "delete" || current.kind === "absent") {
+          await this.block(
+            journal,
+            `Recovery blocked: ${item.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
+          );
+        }
+        const truncated = await isTruncatedHalfWrite(
+          current,
+          item.backupRel ? resolveProjectPath(this.projectRoot, item.backupRel) : null
         );
+        if (truncated) {
+          await this.block(
+            journal,
+            `Recovery blocked: ${item.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
+          );
+        }
+        anyPreserve = true;
+      }
+
+      if (anyPreserve && !anyRestore) {
+        await this.clear();
+        return { recovered: false, preserved: true };
       }
 
       for (const item of [...journal.backups].reverse()) {
@@ -300,6 +326,19 @@ export class ApplyJournal {
 
 function hashField(value: string | null | undefined): value is string | null {
   return typeof value === "string" || value === null;
+}
+
+async function isTruncatedHalfWrite(
+  current: { kind: string; bytes?: Buffer },
+  backupAbs: string | null
+): Promise<boolean> {
+  if (current.kind !== "bytes" || !current.bytes) return false;
+  if (!backupAbs) return current.bytes.length === 0;
+  const backup = await readPresence(backupAbs);
+  if (backup.kind !== "bytes") return current.bytes.length === 0;
+  if (current.bytes.length < backup.bytes.length) return true;
+  if (backup.bytes.length > 0 && current.bytes.length < backup.bytes.length) return true;
+  return false;
 }
 
 export { writeFileNoFollow };

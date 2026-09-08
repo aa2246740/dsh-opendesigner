@@ -45,7 +45,7 @@ There are two buttons. They are not aliases.
 
 **PR4-F01.** The approval `diffHash` is `hashFrozenChangeset`. It binds project, worktree, batch, `baseRef`, every op kind/path/mode, and before/after content hashes (plus the after-byte map). `toolDiffHash` for copy/edit/`accept_source_patch` also binds source/target, `replace_all`, and after bytes. After a receipt is issued, swapping worktree bytes at the same path changes the hash and consume is `DENIED`.
 
-**PR4-R2-01.** Consume of `batch_apply` captures one frozen changeset, hashes it, consumes the receipt against that hash, and stores an immutable clone (`approvedChangeset`). Commit writes that object. It does not look up “latest pinned” by `batchId`. `apply()` captures then commits in one step. Distinct proposals are distinct `hashFrozenChangeset` identities. `executeTool` / `issueHostReceipt` run on one command queue. Concurrent `captureFrozen(B)` while `commitPrepared(A)` is running still writes A. The old pin map is gone.
+**PR4-R2-01 / harsh B01.** Computing a `diffHash` pins an immutable `FrozenChangeset` keyed by that hash (not by `batchId`). `ApprovalLedger.consume` marks that hash as the approved snapshot. `AgentBatchRegistry.apply(batchId)` / commit after consume write those pinned bytes. They do not recapture the mutable worktree. If a `ledger.consume` persist hook swaps the worktree to `NOT_ACCEPTED_B` and issues an unconsumed B receipt, `apply(batchId)` still writes `APPROVED_A`. Distinct proposals are distinct hashes. `executeTool` / `issueHostReceipt` run on one command queue. Concurrent `captureFrozen(B)` while `commitPrepared(A)` is running still writes A. Soft Service `approvedChangeset` is not the only path — `apply` itself honors the consumed pin. Without an approved pin, `apply` still captures (operator / C05 path) or callers use `commitPrepared(frozen)`.
 
 **PR4-F02.** Conflict preflight is not the last check. `commitPrepared` re-reads each destination and compares `expected-before`. A user edit after preflight is `BATCH_CONFLICT`. The user bytes stay.
 
@@ -55,7 +55,9 @@ A leftover `applying` journal is replayed on load only when every path is eviden
 
 **PR4-F03.** Corrupt journal JSON, bad schema, or workspace mismatch is `BATCH_RECOVERY_BLOCKED`. It is not a silent missing journal.
 
-**PR4-R2-03.** Recovery does not pretend success. Hashless old journals, a user repair matching neither hash, a planned write whose file the user deleted, a planned delete whose path the user recreated, and a truncated/half-write (`AGE` vs `AGENT_FULL`) all **BLOCK**. The file, journal, and backups stay. `recovered: true` is not returned and the log is not cleared. The weak hashless auto-restore path (old P02 / PR3-11) is gone. Hashed in-process rollback (C07: later-file failure after an earlier write) still restores from backups when every path matches `beforeHash` or `afterHash`.
+**PR4-R2-03.** Recovery does not pretend success. Hashless old journals, a planned write whose file the user deleted, a planned delete whose path the user recreated, and a truncated/half-write (`AGE` vs `AGENT_FULL`) all **BLOCK**. The file, journal, and backups stay. `recovered: true` is not returned and the log is not cleared. The weak hashless auto-restore path (old P02 / PR3-11) is gone. Hashed in-process rollback (C07: later-file failure after an earlier write) still restores from backups when every path matches `beforeHash` or `afterHash`.
+
+**Harsh G05.** A hashed write journal whose current bytes are `USER_REPAIR` (a complete third hash, distinct from before/after) is a **quiet preserve**: recover keeps `USER_REPAIR`, does not restore the backup, and does not report `recovered: true`. That is a different outcome from unknown truncated half-write, which stays `BATCH_RECOVERY_BLOCKED`.
 
 **PR4-F04.** Every journal `rel` and `backupRel` goes through `resolveProjectPath` before any write. `../` is `BATCH_RECOVERY_BLOCKED` and does not write outside the project.
 
@@ -122,6 +124,7 @@ npm run test:review
 npm run test:review:pr3
 npm run test:review:pr4
 npm run test:review:pr4r2
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr4-harsh/qa/followup.test.mjs
 OPENDESIGNER_PROJECT_ROOT=/absolute/path/to/your/react-app npm run preview
 ```
 
@@ -165,5 +168,13 @@ PR4 round-2 gates (B01–B10, including B08):
 ```sh
 REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr4-r2/qa/*.test.mjs
 ```
+
+Cola harsh followup pack (merge bar for concurrency/recovery: B01 persist-hook race, B09/B10, G05, plus G01–G04/G06–G12 and B02–B08):
+
+```sh
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr4-harsh/qa/followup.test.mjs
+```
+
+In-repo-only pr4r2 green is not enough. See `docs/review-pr4-harsh/BACKLOG_PR4_HARSH.json`.
 
 See `docs/review-pr3/BACKLOG_PR3.json` for PR3-01…PR3-14 and the OD-xx mapping table. Do not treat a mapping row as closing an OD item. Do not claim PR3-01…14 all closed. Do not renumber OD-xx.

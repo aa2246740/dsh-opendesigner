@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-08",
+  "baseSha": "bf3abd72a09c09d6b3cab413984637a02bc8afbe",
+  "note": "Cola followup pack is the merge bar for concurrency/recovery. Soft in-repo pr4r2 tests are not sufficient. Do not weaken B01/B09/B10/G05.",
+  "gate": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr4-harsh/qa/followup.test.mjs",
+  "findings": [
+    {
+      "id": "B01",
+      "severity": "P0",
+      "title": "apply(batchId) must write the consumed receipt snapshot, not a fresh worktree capture",
+      "observed": "After issuing receipt for APPROVED_A, a ledger.consume persist hook swaps the worktree to NOT_ACCEPTED_B and issues an unconsumed B receipt. reg.apply(batchId) then writes B because apply recaptures the mutable worktree. Soft Service approvedChangeset is not enough.",
+      "fix": "Pin an immutable FrozenChangeset by diffHash when hashing/issuing/consuming. apply(batchId) after consume uses that approved pin. Distinct proposals are distinct hashes. Project command queue.",
+      "acceptance": "Main stays/becomes APPROVED_A, never NOT_ACCEPTED_B."
+    },
+    {
+      "id": "B09",
+      "severity": "P0",
+      "title": "MAIN_SNAPSHOT must not clobber BATCH_WORK",
+      "acceptance": "Checkpoint carries worktree identity. Restore writes only to the snapshot worktree (or refuses cross-worktree). Validate the full restore plan before moving the cursor."
+    },
+    {
+      "id": "B10",
+      "severity": "P0",
+      "title": "Binary mid-history checkpoint 81 00 must restore 81 00",
+      "acceptance": "captureSourceFiles stores binary mid-history bytes/hashes. Rewind does not fall back to the first baseline 80 00."
+    },
+    {
+      "id": "G05",
+      "severity": "P0",
+      "title": "Hashed journal USER_REPAIR is quietly preserved",
+      "acceptance": "Hashed write journal + USER_REPAIR (distinct from before/after hashes) → recover keeps USER_REPAIR without restoring the backup. Truncated half-write (AGE vs AGENT_FULL) stays BLOCKED. Those are different outcomes."
+    }
+  ]
+}

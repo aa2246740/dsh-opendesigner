@@ -24,6 +24,8 @@ export interface Checkpoint {
   kind: CheckpointKind;
   store: CheckpointSnapshot;
   sourceFiles?: SourceOverlay;
+  workspaceId?: string;
+  worktreeKey?: string;
 }
 
 export interface CheckpointSummary {
@@ -114,18 +116,24 @@ export class CheckpointLog {
     kind: CheckpointKind;
     store: CheckpointSnapshot;
     sourceFiles?: SourceOverlay;
+    workspaceId?: string;
+    worktreeKey?: string;
   }): Promise<Checkpoint> {
     if (this.cursor >= 0 && this.cursor < this.entries.length - 1) {
       this.entries = this.entries.slice(0, this.cursor + 1);
     }
     const overlay = migrateOverlay(input.sourceFiles) ?? input.sourceFiles;
+    const worktreeKey = overlay?.worktreeKey || input.worktreeKey || ".";
+    const workspaceId = overlay?.workspaceId || input.workspaceId;
     const checkpoint: Checkpoint = {
       id: `cp_${randomUUID()}`,
       createdAt: new Date().toISOString(),
       label: input.label,
       kind: input.kind,
       store: cloneSnapshot(input.store),
-      sourceFiles: overlay ? cloneSnapshot(overlay) : undefined
+      sourceFiles: overlay ? cloneSnapshot(overlay) : undefined,
+      workspaceId,
+      worktreeKey
     };
     this.entries.push(checkpoint);
     if (this.entries.length > this.maxEntries) {

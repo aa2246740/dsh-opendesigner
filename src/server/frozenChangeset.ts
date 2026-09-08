@@ -35,7 +35,10 @@ export function fingerprintPresence(presence: FilePresence): string | null {
   return contentHash(presence.bytes);
 }
 
-export function hashFrozenChangeset(changeset: FrozenChangeset): string {
+const PINNED_BY_HASH = new Map<string, FrozenChangeset>();
+const APPROVED_HASH_BY_BATCH = new Map<string, string>();
+
+function digestFrozenChangeset(changeset: FrozenChangeset): string {
   const hash = createHash("sha256");
   hash.update("frozen-changeset-v1");
   hash.update("\0");
@@ -68,6 +71,41 @@ export function hashFrozenChangeset(changeset: FrozenChangeset): string {
     hash.update("\0");
   }
   return hash.digest("hex");
+}
+
+export function hashFrozenChangeset(changeset: FrozenChangeset): string {
+  return pinFrozenChangeset(changeset);
+}
+
+export function pinFrozenChangeset(changeset: FrozenChangeset, knownHash?: string): string {
+  const hash = knownHash ?? digestFrozenChangeset(changeset);
+  if (!PINNED_BY_HASH.has(hash)) {
+    PINNED_BY_HASH.set(hash, cloneFrozenChangeset(changeset));
+  }
+  return hash;
+}
+
+export function frozenForHash(hash: string): FrozenChangeset | undefined {
+  const pinned = PINNED_BY_HASH.get(hash);
+  return pinned ? cloneFrozenChangeset(pinned) : undefined;
+}
+
+export function markFrozenApproved(hash: string): FrozenChangeset | undefined {
+  const frozen = PINNED_BY_HASH.get(hash);
+  if (!frozen) return undefined;
+  APPROVED_HASH_BY_BATCH.set(frozen.batchId, hash);
+  return cloneFrozenChangeset(frozen);
+}
+
+export function approvedFrozenFor(batchId: string): FrozenChangeset | undefined {
+  const hash = APPROVED_HASH_BY_BATCH.get(batchId);
+  if (!hash) return undefined;
+  const frozen = PINNED_BY_HASH.get(hash);
+  return frozen ? cloneFrozenChangeset(frozen) : undefined;
+}
+
+export function clearApprovedFrozen(batchId: string): void {
+  APPROVED_HASH_BY_BATCH.delete(batchId);
 }
 
 export function cloneFrozenChangeset(changeset: FrozenChangeset): FrozenChangeset {

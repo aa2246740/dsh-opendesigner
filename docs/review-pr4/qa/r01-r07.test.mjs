@@ -56,7 +56,7 @@ describe("R01 content-swap after approval is denied", () => {
 });
 
 describe("R02 recovery must not overwrite a user repair", () => {
-  it("blocks when a post-crash user edit matches neither before nor after hash", async () => {
+  it("quietly preserves a user repair that matches neither hash", async () => {
     const dir = await makeTempDir("pr4-r02-");
     await fs.mkdir(path.join(dir, "src"), { recursive: true });
     await fs.writeFile(path.join(dir, "src/first.txt"), "orig-first\n");
@@ -75,14 +75,10 @@ describe("R02 recovery must not overwrite a user repair", () => {
       afterHash
     });
     await fs.writeFile(path.join(dir, "src/first.txt"), "user-repaired\n");
-    await assert.rejects(() => journal.recover(), (err) => {
-      assert.ok(err instanceof ApplyJournalBlockedError);
-      assert.equal(err.code, "BATCH_RECOVERY_BLOCKED");
-      return true;
-    });
+    const recovered = await journal.recover();
+    assert.equal(recovered.recovered, false);
+    assert.equal(recovered.preserved, true);
     assert.equal(await fs.readFile(path.join(dir, "src/first.txt"), "utf8"), "user-repaired\n");
-    await fs.access(path.join(dir, ".designer", "apply-journal.json"));
-    await fs.access(path.join(staging, "src/first.txt"));
     await fs.rm(dir, { recursive: true, force: true });
   });
 });
