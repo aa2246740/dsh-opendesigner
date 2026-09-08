@@ -336,9 +336,7 @@ export class AgentBatchRegistry {
   public async apply(batchId: string): Promise<BatchApplyResult> {
     return this.enqueueWrite(async () => {
       await this.journal.recover();
-      this.requireOpen(batchId);
       const frozen = await this.captureFrozen(batchId);
-      await this.assertFrozenConflicts(batchId, frozen);
       return await this.commitPreparedInner(frozen);
     });
   }
@@ -353,7 +351,18 @@ export class AgentBatchRegistry {
   }
 
   private async commitPreparedInner(frozen: FrozenChangeset): Promise<BatchApplyResult> {
+    await this.journal.recover();
     const batch = this.requireOpen(frozen.batchId);
+    if (frozen.projectId !== this.workspaceId) {
+      throw new BatchError("Frozen changeset project does not match this workspace.", "BATCH_CONFLICT");
+    }
+    if (frozen.batchId !== batch.batchId || frozen.worktreeRelPath !== batch.worktreeRelPath) {
+      throw new BatchError("Frozen changeset does not match the open batch.", "BATCH_CONFLICT");
+    }
+    if (frozen.baseVersion !== batch.baseRef) {
+      throw new BatchError("Frozen changeset baseVersion does not match the batch baseRef.", "BATCH_CONFLICT");
+    }
+    await this.assertFrozenConflicts(batch.batchId, frozen);
     const copied: string[] = [];
     const deleted: string[] = [];
     const staging = this.journal.stagingDir(batch.batchId);
