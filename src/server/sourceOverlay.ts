@@ -85,6 +85,16 @@ export function materializeRestorePlan(srcDir: string, overlay: SourceOverlay): 
   return Object.entries(overlay.files).map(([rel, entry]) => materializeOverlayEntry(srcDir, rel, entry));
 }
 
+export function validateRestorePlan(plan: RestorePlanStep[]): void {
+  for (const step of plan) {
+    if (!step.abs || step.abs.length === 0) {
+      const error = new Error("CHECKPOINT_RESTORE_INVALID");
+      (error as Error & { code: string }).code = "CHECKPOINT_RESTORE_INVALID";
+      throw error;
+    }
+  }
+}
+
 export async function applyRestorePlan(plan: RestorePlanStep[]): Promise<void> {
   for (const step of plan) {
     if (step.bytes === null) {

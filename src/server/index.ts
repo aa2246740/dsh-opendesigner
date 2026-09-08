@@ -15,7 +15,7 @@ import { CheckpointLog, type CheckpointKind, type SourceOverlay } from "./checkp
 import { AgentBatchRegistry, BatchError, GitRequiredError, type BatchApplyResult } from "./agentBatch.ts";
 import { ApplyJournalBlockedError } from "./applyJournal.ts";
 import { RuntimeBusyError, RuntimeLock } from "./runtimeLock.ts";
-import { hashFrozenChangeset, cloneFrozenChangeset, type FrozenChangeset } from "./frozenChangeset.ts";
+import { hashFrozenChangeset, cloneFrozenChangeset, markFrozenApproved, type FrozenChangeset } from "./frozenChangeset.ts";
 import { contentHash, readPresence, writeFileNoFollow, readTextNoFollow } from "./fileBytes.ts";
 import { SourceBaselineStore, bytesFromBaseline, readBaselinePresence } from "./sourceBaseline.ts";
 import {
@@ -23,6 +23,7 @@ import {
   materializeOverlayEntry,
   migrateOverlay,
   overlayRoot,
+  validateRestorePlan,
   type RestorePlanStep
 } from "./sourceOverlay.ts";
 import { git } from "./gitExec.ts";
@@ -323,9 +324,13 @@ export class OpenDesignerService {
 
   public async captureSourceFiles(): Promise<SourceOverlay> {
     const worktreeKey = this.worktreeKey();
-    const root = this.fileIoRoot();
+    const root = overlayRoot(this.projectRoot, worktreeKey);
     const files: SourceOverlay["files"] = {};
-    for (const rel of this.sessionTouched) {
+    const rels = new Set<string>([
+      ...this.sessionTouched,
+      ...Object.keys(this.sourceBaselines.overlay(worktreeKey))
+    ]);
+    for (const rel of rels) {
       const abs = resolveProjectPath(root, rel);
       files[rel] = await readBaselinePresence(abs);
     }
@@ -338,16 +343,19 @@ export class OpenDesignerService {
 
   public async restoreSourceFiles(files?: SourceOverlay): Promise<void> {
     const overlay = migrateOverlay(files);
-    const worktreeKey = overlay?.worktreeKey || ".";
     if (overlay?.workspaceId && overlay.workspaceId !== this.projectId) {
       const error = new Error("Checkpoint workspace identity does not match this runtime.");
       (error as Error & { code: string }).code = "CHECKPOINT_WORKSPACE_MISMATCH";
       throw error;
     }
-    const root = overlayRoot(this.projectRoot, worktreeKey);
+    const snapshotWorktree = overlay?.worktreeKey || ".";
+    const root = overlayRoot(this.projectRoot, snapshotWorktree);
     const overlayFiles = overlay?.files ?? {};
-    const baseline = this.sourceBaselines.overlay(worktreeKey || ".");
-    const rels = new Set<string>([...this.sessionTouched, ...Object.keys(baseline), ...Object.keys(overlayFiles)]);
+    const baseline = this.sourceBaselines.overlay(snapshotWorktree);
+    const rels = new Set<string>([...Object.keys(overlayFiles), ...Object.keys(baseline)]);
+    if (snapshotWorktree === this.worktreeKey()) {
+      for (const rel of this.sessionTouched) rels.add(rel);
+    }
     const plan: RestorePlanStep[] = [];
     for (const rel of rels) {
       if (Object.prototype.hasOwnProperty.call(overlayFiles, rel)) {
@@ -364,6 +372,7 @@ export class OpenDesignerService {
       if (!bytes) continue;
       plan.push({ rel, abs: resolveProjectPath(root, rel), bytes });
     }
+    validateRestorePlan(plan);
     await applyRestorePlan(plan);
   }
 
@@ -395,7 +404,9 @@ export class OpenDesignerService {
       label: input.label,
       kind: input.kind ?? (hasFiles ? "session" : "canvas"),
       store: this.store.toJSON(),
-      sourceFiles
+      sourceFiles,
+      workspaceId: this.projectId,
+      worktreeKey: sourceFiles.worktreeKey
     });
     return {
       success: true,
@@ -415,7 +426,18 @@ export class OpenDesignerService {
     const plan = checkpointId
       ? this.checkpoints.planRewindTo(checkpointId)
       : this.checkpoints.planRewind();
-    await this.restoreSourceFiles(plan.checkpoint.sourceFiles);
+    const overlay = migrateOverlay(plan.checkpoint.sourceFiles);
+    const snapshotWorktree = overlay?.worktreeKey || plan.checkpoint.worktreeKey || ".";
+    if (overlay?.workspaceId && overlay.workspaceId !== this.projectId) {
+      const error = new Error("Checkpoint workspace identity does not match this runtime.");
+      (error as Error & { code: string }).code = "CHECKPOINT_WORKSPACE_MISMATCH";
+      throw error;
+    }
+    await this.restoreSourceFiles({
+      workspaceId: overlay?.workspaceId || plan.checkpoint.workspaceId || this.projectId,
+      worktreeKey: snapshotWorktree,
+      files: overlay?.files ?? {}
+    });
     this.store.fromJSON(plan.checkpoint.store);
     this.storeVersion += 1;
     const checkpoint = await this.checkpoints.commitRewind(plan);
@@ -953,6 +975,7 @@ export class OpenDesignerService {
         tool: toolName
       });
       this.approvedChangeset = cloneFrozenChangeset(frozen);
+      markFrozenApproved(diffHash);
       return;
     }
     const diffHash = await this.toolDiffHash(toolName, args);
