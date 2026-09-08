@@ -24,6 +24,7 @@ import {
   migrateOverlay,
   overlayRoot,
   recoverRestoreJournal,
+  validateRestorePlan,
   type RestorePlanStep
 } from "./sourceOverlay.ts";
 import { git } from "./gitExec.ts";
@@ -366,6 +367,7 @@ export class OpenDesignerService {
       if (!bytes) continue;
       plan.push({ rel, abs: resolveProjectPath(root, rel), bytes });
     }
+    validateRestorePlan(plan);
     await applyRestorePlan(plan);
   }
 
@@ -397,7 +399,9 @@ export class OpenDesignerService {
       label: input.label,
       kind: input.kind ?? (hasFiles ? "session" : "canvas"),
       store: this.store.toJSON(),
-      sourceFiles
+      sourceFiles,
+      workspaceId: sourceFiles.workspaceId,
+      worktreeKey: sourceFiles.worktreeKey
     });
     return {
       success: true,

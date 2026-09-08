@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { resolveProjectPath } from "./pathJail.ts";
@@ -88,6 +89,36 @@ export function materializeRestorePlan(srcDir: string, overlay: SourceOverlay): 
   return Object.entries(overlay.files).map(([rel, entry]) => materializeOverlayEntry(srcDir, rel, entry));
 }
 
+function restorePlanError(code: string, message: string): Error {
+  const error = new Error(message);
+  (error as Error & { code: string }).code = code;
+  return error;
+}
+
+export function validateRestorePlan(plan: RestorePlanStep[]): void {
+  for (const step of plan) {
+    if (typeof step.rel !== "string" || step.rel.length === 0) {
+      throw restorePlanError("RESTORE_PLAN_INVALID", "Restore plan step is missing rel.");
+    }
+    if (typeof step.abs !== "string" || step.abs.length === 0) {
+      throw restorePlanError("RESTORE_PLAN_INVALID", `Restore plan step for ${step.rel} is missing abs.`);
+    }
+    let st: fsSync.Stats;
+    try {
+      st = fsSync.lstatSync(step.abs);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      throw restorePlanError("PATH_JAIL", `PATH_JAIL: symlink at restore target ${step.abs}`);
+    }
+    if (st.isDirectory()) {
+      throw restorePlanError("EISDIR", `EISDIR: ${step.abs}`);
+    }
+  }
+}
+
 export function restoreJournalPath(srcDir: string): string {
   return path.join(srcDir, ".designer", "restore-journal.json");
 }
@@ -129,6 +160,7 @@ export async function recoverRestoreJournal(srcDir: string, workspaceId?: string
 
 export async function applyRestorePlan(plan: RestorePlanStep[]): Promise<void> {
   if (plan.length === 0) return;
+  validateRestorePlan(plan);
   await preflightRestorePlan(plan);
   const srcDir = inferRestoreSourceDir(plan);
   const workspaceId = workspaceIdOf(srcDir);
