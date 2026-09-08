@@ -181,5 +181,13 @@ export function mergeTailwindTokens(existingClasses: string, tokensToAddOrReplac
   return currentTokens.join(" ");
 }
 
+export function dropTailwindCategory(existingClasses: string, category: string): string {
+  return existingClasses
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((token) => getTailwindCategory(token) !== category)
+    .join(" ");
+}
+
 export const mergeTailwindClasses = mergeTailwindTokens;
 

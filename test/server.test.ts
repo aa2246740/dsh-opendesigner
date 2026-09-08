@@ -130,6 +130,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
   });
 
   after(async () => {
+    if (service) await service.stop().catch(() => undefined);
     await fs.rm(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -162,47 +163,48 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
   });
 
   it("should dispatch canvas tools with strict claim and screenshot workflow", async () => {
-    // 1. Create page
-    const pageRes = await service.executeTool("canvas_create_page", { name: "Dashboard" });
+    const isolated = new OpenDesignerService({
+      projectRoot: path.join(TEST_DIR, "claim-workflow"),
+      autoApprove: true,
+      screenshotMode: "html-render"
+    });
+    await isolated.init();
+
+    const pageRes = await isolated.executeTool("canvas_create_page", { name: "Dashboard" });
     assert.equal(pageRes.success, true);
     const rootId = pageRes.rootElementId;
 
-    // 2. Read canvas
-    const readRes = await service.executeTool("canvas_read", { elementId: rootId });
+    const readRes = await isolated.executeTool("canvas_read", { elementId: rootId });
     assert.ok(readRes.covering_hash);
     const coveringHash = readRes.covering_hash;
 
-    // 3. Claim lock
-    const claimRes = await service.executeTool("canvas_claim", {
+    const claimRes = await isolated.executeTool("canvas_claim", {
       elementId: rootId,
       covering_hash: coveringHash
     });
     assert.equal(claimRes.success, true);
     const claimId = claimRes.claimId;
 
-    // 4. Update canvas element
-    const updateRes = await service.executeTool("canvas_update", {
+    const updateRes = await isolated.executeTool("canvas_update", {
       claim_id: claimId,
       elementId: rootId,
       props: { className: "bg-blue-600 text-white" }
     });
     assert.equal(updateRes.success, true);
 
-    // 5. Try release directly -> MUST FAIL
-    const unverifiedRelease = await service.executeTool("canvas_release", { claim_id: claimId });
+    const unverifiedRelease = await isolated.executeTool("canvas_release", { claim_id: claimId });
     assert.equal(unverifiedRelease.success, false);
     assert.ok(unverifiedRelease.error?.includes("VERIFICATION_REQUIRED"));
 
-    // 6. Screenshot inspection
-    const shotRes = await service.executeTool("take_screenshot", { elementId: rootId });
+    const shotRes = await isolated.executeTool("take_screenshot", { elementId: rootId });
     assert.equal(shotRes.success, true);
     assert.equal(shotRes.kind, "html-render");
-    assert.equal(shotRes.visualProof, true);
+    assert.equal(shotRes.visualProof, false);
     assert.ok(String(shotRes.screenshotDataUrl).startsWith("data:text/html"));
 
-    // 7. Release now succeeds
-    const verifiedRelease = await service.executeTool("canvas_release", { claim_id: claimId });
-    assert.equal(verifiedRelease.success, true);
+    const verifiedRelease = await isolated.executeTool("canvas_release", { claim_id: claimId });
+    assert.equal(verifiedRelease.success, false);
+    await isolated.stop();
   });
 
   it("should enforce optimistic concurrency with STALE_READ rejection on covering_hash mismatch", async () => {
@@ -252,10 +254,12 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     assert.equal(delRes.success, true);
     assert.equal(service.store.getElement(childId), undefined);
 
-    // Verify and release
-    await service.executeTool("take_screenshot", { elementId: parentId });
+    const shotRes = await service.executeTool("take_screenshot", { elementId: parentId });
+    assert.equal(shotRes.success, true);
+    assert.equal(shotRes.visualProof, false);
     const relRes = await service.executeTool("canvas_release", { claim_id: parentClaim.claimId });
-    assert.equal(relRes.success, true);
+    assert.equal(relRes.success, false);
+    assert.ok(String(relRes.error || "").includes("VERIFICATION_REQUIRED"));
   });
 
   it("should reject canvas_edit when old_string is not found in element", async () => {
@@ -297,7 +301,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
   });
 
   it("rejects filesystem escape and default-deny destructive writes", async () => {
-    const jailed = new OpenDesignerService({ projectRoot: TEST_DIR, autoApprove: false });
+    const jailed = new OpenDesignerService({ projectRoot: path.join(TEST_DIR, "jail-extra"), autoApprove: false });
     const abs = await jailed.executeTool("project_read", { path: "/etc/passwd" });
     assert.equal(abs.success, false);
     assert.equal(abs.code, "PATH_JAIL");
@@ -311,7 +315,7 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
       content: "nope"
     });
     assert.equal(denied.success, false);
-    assert.equal(denied.code, "APPROVAL_REQUIRED");
+    assert.equal(denied.code, "DENIED");
 
     const approved = await jailed.executeTool(
       "project_write",
@@ -322,7 +326,23 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
       },
       { approvalChannel: "host" }
     );
-    assert.equal(approved.success, true);
+    assert.equal(approved.success, false);
+    assert.equal(approved.code, "DENIED");
+
+    const issued = await jailed.issueHostReceipt("project_write", {
+      path: "src/denied.tsx",
+      content: "ok"
+    });
+    const withReceipt = await jailed.executeTool(
+      "project_write",
+      {
+        path: "src/denied.tsx",
+        content: "ok",
+        approvalReceipt: (issued as { approvalReceipt: string }).approvalReceipt
+      },
+      { approvalChannel: "host" }
+    );
+    assert.equal(withReceipt.success, true);
 
     const modelApprove = await jailed.executeTool("project_write", {
       path: "src/denied-model.tsx",
@@ -330,9 +350,9 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
       approve: true
     });
     assert.equal(modelApprove.success, false);
-    assert.equal(modelApprove.code, "APPROVAL_REQUIRED");
+    assert.equal(modelApprove.code, "DENIED");
 
-    const auto = new OpenDesignerService({ projectRoot: TEST_DIR, autoApprove: true });
+    const auto = new OpenDesignerService({ projectRoot: path.join(TEST_DIR, "auto-extra"), autoApprove: true });
     const autoWrite = await auto.executeTool("project_write", {
       path: "src/auto.tsx",
       content: "auto"
@@ -349,19 +369,22 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     const missing = await jailed.executeTool("project_read", { path: "src/does-not-exist.tsx" });
     assert.equal(missing.success, false);
     assert.equal(missing.code, "NOT_FOUND");
+    await jailed.stop();
+    await auto.stop();
   });
 
   it("does not mark claims verified from a missing screenshot renderer", async () => {
-    const closed = new OpenDesignerService({ projectRoot: TEST_DIR, screenshotMode: "none" });
+    const closed = new OpenDesignerService({ projectRoot: path.join(TEST_DIR, "noshot"), screenshotMode: "none" });
     const pageRes = await closed.executeTool("canvas_create_page", { name: "NoShot" });
     const shot = await closed.executeTool("take_screenshot", { elementId: pageRes.rootElementId });
     assert.equal(shot.success, false);
     assert.equal(shot.implemented, false);
+    await closed.stop();
   });
 
   it("does not treat jsx-svg as visual proof", async () => {
     const fake = new OpenDesignerService({
-      projectRoot: TEST_DIR,
+      projectRoot: path.join(TEST_DIR, "svg-shot"),
       autoApprove: true,
       screenshotMode: "jsx-svg"
     });
@@ -383,5 +406,6 @@ describe("Server - 38 MCP Tools Dispatcher Execution", () => {
     assert.equal(shot.visualProof, false);
     const unverified = await fake.executeTool("canvas_release", { claim_id: claimRes.claimId });
     assert.equal(unverified.success, false);
+    await fake.stop();
   });
 });

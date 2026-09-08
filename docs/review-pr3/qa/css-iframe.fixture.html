@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>css-iframe-pending</title>
+  <style id="trusted-css">
+    .probe {
+      background-color: rgb(16, 185, 129);
+      border-radius: 12px;
+      box-shadow: rgb(0, 0, 0) 0px 8px 16px 0px;
+      width: 80px;
+      height: 40px;
+    }
+  </style>
+</head>
+<body>
+  <div id="parent-probe" class="probe" data-testid="parent-probe">parent</div>
+  <iframe id="sandbox" data-testid="component-sandbox" sandbox="allow-same-origin"></iframe>
+  <pre id="result" data-testid="css-iframe-result">pending</pre>
+  <script type="module">
+    const trusted = document.getElementById("trusted-css").textContent;
+    const iframe = document.getElementById("sandbox");
+    const srcdoc = `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src data: https:; script-src 'none'; connect-src 'none'; object-src 'none'"><style>${trusted}</style></head><body style="margin:0"><div id="child-probe" class="probe">child</div></body></html>`;
+    iframe.srcdoc = srcdoc;
+    iframe.addEventListener("load", () => {
+      const parent = getComputedStyle(document.getElementById("parent-probe"));
+      const childDoc = iframe.contentDocument;
+      const sheets = childDoc.styleSheets.length;
+      const child = getComputedStyle(childDoc.getElementById("child-probe"));
+      const ok =
+        parent.backgroundColor === child.backgroundColor &&
+        parent.borderRadius === child.borderRadius &&
+        parent.boxShadow === child.boxShadow &&
+        sheets > 0;
+      const payload = {
+        ok,
+        sheets,
+        parent: {
+          backgroundColor: parent.backgroundColor,
+          borderRadius: parent.borderRadius,
+          boxShadow: parent.boxShadow
+        },
+        child: {
+          backgroundColor: child.backgroundColor,
+          borderRadius: child.borderRadius,
+          boxShadow: child.boxShadow
+        }
+      };
+      document.title = ok ? "CSS_IFRAME_PASS" : "CSS_IFRAME_FAIL";
+      document.getElementById("result").textContent = JSON.stringify(payload);
+    });
+  </script>
+</body>
+</html>

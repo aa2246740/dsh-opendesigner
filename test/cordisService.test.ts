@@ -49,7 +49,7 @@ describe("Server - DSH plugin form", () => {
       listTools: () => Array.from(registeredTools.values())
     };
 
-    const service = apply({ tools: mockToolsService }, { projectRoot: CORDIS_TEST_DIR, autoApprove: true });
+    const service = apply({ tools: mockToolsService }, { projectRoot: path.join(CORDIS_TEST_DIR, "register"), autoApprove: true });
     assert.ok(service instanceof OpenDesignerService);
     assert.ok(registeredTools.has("opendesigner_canvas_claim"));
     assert.ok(registeredTools.has("opendesigner_status"));
@@ -67,6 +67,7 @@ describe("Server - DSH plugin form", () => {
       () => listTool.execute({}, { signal: ac.signal }),
       /aborted/
     );
+    await service.stop();
   });
 
   it("wraps tools with defineTool so output.schema is JSON Schema", async () => {
@@ -79,7 +80,7 @@ describe("Server - DSH plugin form", () => {
           }
         }
       },
-      { projectRoot: CORDIS_TEST_DIR, autoApprove: true }
+      { projectRoot: path.join(CORDIS_TEST_DIR, "schema"), autoApprove: true }
     );
     const status = registeredTools.get("opendesigner_status");
     assert.ok(status);
@@ -92,8 +93,38 @@ describe("Server - DSH plugin form", () => {
     assert.doesNotThrow(() => assertSupportedJsonSchema(write.output.schema));
   });
 
+  it("asks the DSH host approval channel before minting a receipt (PR3-08)", async () => {
+    const registeredTools = new Map<string, any>();
+    const asks: string[] = [];
+    apply(
+      {
+        tools: {
+          register: (tool: any) => {
+            registeredTools.set(tool.name, tool);
+          }
+        },
+        on: (event: string, handler: (exec: unknown, next: unknown) => unknown) => {
+          if (event !== "tools/pre-execute") return;
+          const exec = { name: "opendesigner_project_write", args: { path: "src/x.tsx", content: "x" } };
+          const decision = handler(exec, () => Promise.resolve({ kind: "allow" }));
+          asks.push(event);
+          void Promise.resolve(decision).then((value) => {
+            asks.push(JSON.stringify(value));
+          });
+        }
+      },
+      { projectRoot: path.join(CORDIS_TEST_DIR, "ask"), autoApprove: false }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(asks[0], "tools/pre-execute");
+    assert.match(asks[1] || "", /"kind":"ask"/);
+    assert.ok(registeredTools.has("opendesigner_project_write"));
+    assert.ok(registeredTools.has("opendesigner_accept_source_patch"));
+  });
+
   it("saves canvas on stop", async () => {
-    const service = new OpenDesignerService({ projectRoot: CORDIS_TEST_DIR });
+    const dir = path.join(CORDIS_TEST_DIR, "lifecycle");
+    const service = new OpenDesignerService({ projectRoot: dir });
     service.store.setElement({
       id: "lifecycle_node",
       type: "element",
@@ -103,7 +134,7 @@ describe("Server - DSH plugin form", () => {
     await service.start();
     await service.stop();
 
-    const canvasFile = path.join(CORDIS_TEST_DIR, ".designer/canvas.json");
+    const canvasFile = path.join(dir, ".designer/canvas.json");
     const exists = await fs.stat(canvasFile).then(() => true).catch(() => false);
     assert.equal(exists, true);
     const content = JSON.parse(await fs.readFile(canvasFile, "utf-8"));

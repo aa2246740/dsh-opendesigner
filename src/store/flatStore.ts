@@ -90,10 +90,29 @@ export function assertValidGraph(data: FlatStoreJson): void {
     if (!Array.isArray(children)) {
       throw new GraphError(`childrenByParent.${parentId} must be an array`);
     }
+    const seen = new Set<string>();
     for (const childId of children) {
       if (!byId[childId]) {
         throw new GraphError(`Missing child node ${childId} under ${parentId}`);
       }
+      if (seen.has(childId)) {
+        throw new GraphError(`Duplicate child ${childId} under ${parentId}`);
+      }
+      seen.add(childId);
+      if (parentByChild[childId] !== parentId) {
+        throw new GraphError(`parent/child maps disagree for ${childId}`);
+      }
+    }
+  }
+
+  const claimedParent = new Map<string, string>();
+  for (const [parentId, children] of Object.entries(childrenByParent)) {
+    for (const childId of children) {
+      const previous = claimedParent.get(childId);
+      if (previous && previous !== parentId) {
+        throw new GraphError(`child ${childId} has multiple parents`);
+      }
+      claimedParent.set(childId, parentId);
     }
   }
 
@@ -103,6 +122,10 @@ export function assertValidGraph(data: FlatStoreJson): void {
     }
     if (!byId[parentId]) {
       throw new GraphError(`parentByChild references missing parent ${parentId}`);
+    }
+    const siblings = childrenByParent[parentId];
+    if (!Array.isArray(siblings) || !siblings.includes(childId)) {
+      throw new GraphError(`parent/child maps disagree for ${childId}`);
     }
   }
 
@@ -127,6 +150,12 @@ export function assertValidGraph(data: FlatStoreJson): void {
   for (const page of pages) {
     if (!page || typeof page.rootElementId !== "string" || !byId[page.rootElementId]) {
       throw new GraphError(`Dangling page root ${page?.rootElementId ?? "(missing)"}`);
+    }
+  }
+
+  if (data.activePageId) {
+    if (!pages.some((page) => page.id === data.activePageId)) {
+      throw new GraphError(`active page ${data.activePageId} is not in pages`);
     }
   }
 }
@@ -356,6 +385,9 @@ export class FlatStore {
   }
 
   public setActivePage(pageId: string): void {
+    if (!this.state.pages.some((page) => page.id === pageId)) {
+      throw new GraphError(`active page ${pageId} is not in pages`);
+    }
     this.state.activePageId = pageId;
   }
 

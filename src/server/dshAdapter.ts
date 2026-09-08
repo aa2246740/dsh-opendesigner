@@ -36,6 +36,7 @@ export interface DshHostContext {
   };
   inject?: (deps: string[], fn: (ctx: DshHostContext) => void) => void;
   get?: (name: string) => unknown;
+  on?: (event: string, handler: (...args: unknown[]) => unknown) => unknown;
 }
 
 /** Host CLI and `@deepseek-ai/dsh-tools` release this plugin is proved against. */
@@ -182,7 +183,11 @@ export function extraApproveParam(tool: MCPToolDefinition): DshToolParameters {
     approve: {
       type: "boolean",
       description:
-        "Ignored unless the host/UI marks the call as a trusted approval channel. The model cannot authorize destructive tools by setting this flag."
+        "Ignored. The model cannot authorize destructive tools by setting this flag. Hosts must issue a one-shot approval receipt."
+    },
+    approvalReceipt: {
+      type: "string",
+      description: "One-shot host approval receipt bound to project, revision, and diff hash."
     }
   };
 }

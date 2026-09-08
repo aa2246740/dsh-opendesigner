@@ -7,12 +7,39 @@ import { dispatchMCPTool, OPEN_DESIGNER_TOOLS } from "./mcpTools.ts";
 import type { MCPContext, ScreenshotMode } from "./mcpTools.ts";
 import { AIGateway, liveProvidersStatus, type AIGatewayConfig, type AIProvider } from "./aiGateway.ts";
 import { REQUIRED_DSH_RELEASE } from "./dshAdapter.ts";
-import { ApprovalRequiredError, assertPersistApproval, type ApprovalChannel } from "./approval.ts";
+import { ApprovalRequiredError, catalogApprovalMode, persistApprovalMode, type ApprovalChannel } from "./approval.ts";
+import { ApprovalDeniedError, ApprovalLedger, hashDiffPayload } from "./approvalReceipt.ts";
 import { PathJailError, resolveProjectPath } from "./pathJail.ts";
-import { atomicWriteFile, atomicWriteJson } from "./atomicWrite.ts";
+import { atomicWriteJson } from "./atomicWrite.ts";
 import { CheckpointLog, type CheckpointKind, type SourceOverlay } from "./checkpoints.ts";
 import { AgentBatchRegistry, BatchError, GitRequiredError, type BatchApplyResult } from "./agentBatch.ts";
+import { ApplyJournalBlockedError } from "./applyJournal.ts";
+import { RuntimeBusyError, RuntimeLock } from "./runtimeLock.ts";
+import { hashFrozenChangeset, cloneFrozenChangeset, type FrozenChangeset } from "./frozenChangeset.ts";
+import { contentHash, readPresence, writeFileNoFollow, readTextNoFollow } from "./fileBytes.ts";
+import { SourceBaselineStore, bytesFromBaseline, readBaselinePresence } from "./sourceBaseline.ts";
+import {
+  applyRestorePlan,
+  materializeOverlayEntry,
+  migrateOverlay,
+  overlayRoot,
+  type RestorePlanStep
+} from "./sourceOverlay.ts";
 import { git } from "./gitExec.ts";
+import { importJsxToElements } from "../compiler/jsxImport.ts";
+import {
+  SourcePatchError,
+  type SourcePatchProposal,
+  applyBoundEdits,
+  applyIntentToClassName,
+  classNamePatch,
+  extractClassNameAt,
+  hashSource,
+  looksLikeFakeButtonWrapper,
+  parseIntent,
+  sliceEdits,
+  unifiedDiff
+} from "../compiler/sourcePatch.ts";
 import {
   CANVAS_MUTATION_TOOLS,
   PERSISTENCE_TOOL_NAMES,
@@ -69,8 +96,15 @@ export class OpenDesignerService {
   public aiGateway: AIGateway;
   public checkpoints: CheckpointLog;
   public batches: AgentBatchRegistry;
+  public approvals: ApprovalLedger;
   public sessionTouched = new Set<string>();
-  private sourceBaseline = new Map<string, string | null>();
+  private sourceBaselines: SourceBaselineStore;
+  private pendingProposal: SourcePatchProposal | null = null;
+  private approvedChangeset: FrozenChangeset | null = null;
+  private saveChain: Promise<unknown> = Promise.resolve();
+  private commandChain: Promise<unknown> = Promise.resolve();
+  private runtimeLock: RuntimeLock;
+  private initPromise: Promise<void> | null = null;
 
   private canvasFilePath: string;
   private designerDir: string;
@@ -97,8 +131,15 @@ export class OpenDesignerService {
     this.checkpoints = new CheckpointLog(path.join(this.designerDir, "checkpoints.json"));
     this.batches = new AgentBatchRegistry(
       this.projectRoot,
-      path.join(this.designerDir, "batches.json")
+      path.join(this.designerDir, "batches.json"),
+      this.projectId
     );
+    this.approvals = new ApprovalLedger(path.join(this.designerDir, "approvals.json"));
+    this.sourceBaselines = new SourceBaselineStore(
+      path.join(this.designerDir, "source-baselines.json"),
+      this.projectId
+    );
+    this.runtimeLock = new RuntimeLock(path.join(this.designerDir, "runtime.lock"));
   }
 
   public fileIoRoot(): string {
@@ -107,31 +148,67 @@ export class OpenDesignerService {
     return this.batches.worktreeAbs(open);
   }
 
+  public worktreeKey(): string {
+    return this.batches.openBatch()?.worktreeRelPath ?? ".";
+  }
+
   public async start(): Promise<void> {
     await this.init();
   }
 
   public async stop(): Promise<void> {
-    await this.saveCanvas();
+    if (this.initPromise) await this.initPromise.catch(() => undefined);
+    try {
+      if (this.isInitialized) await this.saveCanvas();
+    } finally {
+      await this.runtimeLock.release();
+      this.isInitialized = false;
+      this.initPromise = null;
+    }
   }
 
   public async init(): Promise<void> {
-    if (this.isInitialized) return;
-    await this.loadCanvas();
-    await this.checkpoints.load();
-    await this.batches.load();
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = this.doInit();
     try {
-      const applied = JSON.parse(await fs.readFile(this.appliedFilePath, "utf-8")) as {
-        appliedAt?: string;
-      };
-      this.lastAppliedAt = applied.appliedAt ?? null;
-    } catch {
-      this.lastAppliedAt = null;
+      await this.initPromise;
+    } catch (err) {
+      this.initPromise = null;
+      throw err;
     }
-    if (this.checkpoints.entries.length === 0) {
-      await this.pushCheckpoint({ label: "baseline", kind: "canvas" });
+  }
+
+  private async doInit(): Promise<void> {
+    if (this.isInitialized) return;
+    await this.runtimeLock.acquire();
+    try {
+      await this.loadCanvas();
+      await this.checkpoints.load();
+      await this.batches.load();
+      await this.approvals.load();
+      await this.sourceBaselines.load();
+      for (const rel of Object.keys(this.sourceBaselines.overlay(this.worktreeKey()))) {
+        this.sessionTouched.add(rel);
+      }
+      try {
+        const applied = JSON.parse(await fs.readFile(this.appliedFilePath, "utf-8")) as {
+          appliedAt?: string;
+        };
+        this.lastAppliedAt = applied.appliedAt ?? null;
+      } catch {
+        this.lastAppliedAt = null;
+      }
+      if (this.store.getRootIds().length === 0) {
+        await this.importProjectSource();
+      }
+      if (this.checkpoints.entries.length === 0) {
+        await this.pushCheckpoint({ label: "baseline", kind: "canvas" });
+      }
+      this.isInitialized = true;
+    } catch (err) {
+      await this.runtimeLock.release();
+      throw err;
     }
-    this.isInitialized = true;
   }
 
   public status(): Record<string, unknown> {
@@ -188,24 +265,20 @@ export class OpenDesignerService {
 
   public hydrateStore(data: unknown): void {
     const payload = (data ?? {}) as FlatStoreJson & { baseVersion?: number };
-    if (payload.projectId && payload.projectId !== this.projectId) {
+    if (typeof payload.projectId !== "string" || payload.projectId.length === 0) {
+      throw new ProjectMismatchError("projectId is required");
+    }
+    if (payload.projectId !== this.projectId) {
       throw new ProjectMismatchError();
     }
-    const incomingBase =
-      typeof payload.baseVersion === "number"
-        ? payload.baseVersion
-        : typeof payload.version === "number"
-          ? payload.version
-          : undefined;
-    if (incomingBase !== undefined && incomingBase < this.storeVersion) {
+    if (typeof payload.baseVersion !== "number") {
+      throw new StaleHydrateError("baseVersion is required and must exactly match the runtime version");
+    }
+    if (payload.baseVersion !== this.storeVersion) {
       throw new StaleHydrateError();
     }
     this.store.fromJSON(payload);
-    if (typeof payload.version === "number" && payload.version >= this.storeVersion) {
-      this.storeVersion = payload.version;
-    } else {
-      this.storeVersion += 1;
-    }
+    this.storeVersion += 1;
   }
 
   public canvasPayload(): FlatStoreJson & { projectId: string; version: number; savedAt?: string } {
@@ -221,49 +294,77 @@ export class OpenDesignerService {
     this.storeVersion += 1;
   }
 
-  public async saveCanvas(): Promise<void> {
+  public async saveCanvas(localEditId?: number): Promise<{ savedAt: string; ackRevision: number; localEditId?: number }> {
+    const frozenStore = this.store.toJSON();
+    const frozenVersion = this.storeVersion;
+    const run = this.saveChain.then(() => this.writeCanvas(localEditId, frozenStore, frozenVersion));
+    this.saveChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async writeCanvas(
+    localEditId: number | undefined,
+    frozenStore: FlatStoreJson,
+    frozenVersion: number
+  ): Promise<{ savedAt: string; ackRevision: number; localEditId?: number }> {
     const savedAt = new Date().toISOString();
     await atomicWriteJson(this.canvasFilePath, {
-      ...this.store.toJSON(),
+      ...frozenStore,
       projectId: this.projectId,
-      version: this.storeVersion,
+      version: frozenVersion,
       savedAt
     });
     this.lastAutosaveAt = savedAt;
+    return { savedAt, ackRevision: frozenVersion, localEditId };
   }
 
   public async captureSourceFiles(): Promise<SourceOverlay> {
-    const files: SourceOverlay = {};
+    const worktreeKey = this.worktreeKey();
     const root = this.fileIoRoot();
+    const files: SourceOverlay["files"] = {};
     for (const rel of this.sessionTouched) {
-      try {
-        const abs = resolveProjectPath(root, rel);
-        files[rel] = await fs.readFile(abs, "utf-8");
-      } catch {
-        files[rel] = null;
-      }
+      const abs = resolveProjectPath(root, rel);
+      files[rel] = await readBaselinePresence(abs);
     }
-    return files;
+    return {
+      workspaceId: this.projectId,
+      worktreeKey,
+      files
+    };
   }
 
   public async restoreSourceFiles(files?: SourceOverlay): Promise<void> {
-    const root = this.fileIoRoot();
-    const rels = new Set<string>([
-      ...this.sessionTouched,
-      ...this.sourceBaseline.keys(),
-      ...Object.keys(files ?? {})
-    ]);
-    for (const rel of rels) {
-      const hasSnap = Boolean(files && Object.prototype.hasOwnProperty.call(files, rel));
-      const content = hasSnap ? files![rel] : (this.sourceBaseline.get(rel) ?? null);
-      const abs = resolveProjectPath(root, rel);
-      if (content === null || content === undefined) {
-        await fs.rm(abs, { force: true });
-      } else {
-        await fs.mkdir(path.dirname(abs), { recursive: true });
-        await atomicWriteFile(abs, content);
-      }
+    const overlay = migrateOverlay(files);
+    const worktreeKey = overlay?.worktreeKey || ".";
+    if (overlay?.workspaceId && overlay.workspaceId !== this.projectId) {
+      const error = new Error("Checkpoint workspace identity does not match this runtime.");
+      (error as Error & { code: string }).code = "CHECKPOINT_WORKSPACE_MISMATCH";
+      throw error;
     }
+    const root = overlayRoot(this.projectRoot, worktreeKey);
+    const overlayFiles = overlay?.files ?? {};
+    const baseline = this.sourceBaselines.overlay(worktreeKey || ".");
+    const rels = new Set<string>([...this.sessionTouched, ...Object.keys(baseline), ...Object.keys(overlayFiles)]);
+    const plan: RestorePlanStep[] = [];
+    for (const rel of rels) {
+      if (Object.prototype.hasOwnProperty.call(overlayFiles, rel)) {
+        plan.push(materializeOverlayEntry(root, rel, overlayFiles[rel]!));
+        continue;
+      }
+      const remembered = baseline[rel];
+      if (!remembered || remembered.kind === "unreadable") continue;
+      if (remembered.kind === "absent") {
+        plan.push({ rel, abs: resolveProjectPath(root, rel), bytes: null });
+        continue;
+      }
+      const bytes = bytesFromBaseline(remembered);
+      if (!bytes) continue;
+      plan.push({ rel, abs: resolveProjectPath(root, rel), bytes });
+    }
+    await applyRestorePlan(plan);
   }
 
   private async rememberSourceBaselines(toolName: string, args: Record<string, unknown>): Promise<void> {
@@ -272,29 +373,29 @@ export class OpenDesignerService {
       for (const file of (args.files as Array<{ path?: string }> | undefined) || []) {
         if (typeof file?.path === "string") rels.push(file.path);
       }
+    } else if (toolName === "project_copy_asset") {
+      if (typeof args.targetPath === "string") rels.push(args.targetPath);
     } else if (typeof args.path === "string") {
       rels.push(args.path);
     }
     const root = this.fileIoRoot();
+    const worktree = this.worktreeKey();
     for (const rel of rels) {
       this.sessionTouched.add(rel);
-      if (this.sourceBaseline.has(rel)) continue;
-      try {
-        const abs = resolveProjectPath(root, rel);
-        this.sourceBaseline.set(rel, await fs.readFile(abs, "utf-8"));
-      } catch {
-        this.sourceBaseline.set(rel, null);
-      }
+      const abs = resolveProjectPath(root, rel);
+      this.sourceBaselines.remember(worktree, rel, await readBaselinePresence(abs));
     }
+    await this.sourceBaselines.persist();
   }
 
   public async pushCheckpoint(input: { label: string; kind?: CheckpointKind }): Promise<unknown> {
     const sourceFiles = await this.captureSourceFiles();
+    const hasFiles = Object.keys(sourceFiles.files).length > 0;
     const checkpoint = await this.checkpoints.push({
       label: input.label,
-      kind: input.kind ?? (Object.keys(sourceFiles).length > 0 ? "session" : "canvas"),
+      kind: input.kind ?? (hasFiles ? "session" : "canvas"),
       store: this.store.toJSON(),
-      sourceFiles: Object.keys(sourceFiles).length > 0 ? sourceFiles : undefined
+      sourceFiles
     });
     return {
       success: true,
@@ -311,12 +412,13 @@ export class OpenDesignerService {
   }
 
   public async rewind(checkpointId?: string): Promise<unknown> {
-    const checkpoint = checkpointId
-      ? await this.checkpoints.rewindTo(checkpointId)
-      : await this.checkpoints.rewind();
-    this.store.fromJSON(checkpoint.store);
+    const plan = checkpointId
+      ? this.checkpoints.planRewindTo(checkpointId)
+      : this.checkpoints.planRewind();
+    await this.restoreSourceFiles(plan.checkpoint.sourceFiles);
+    this.store.fromJSON(plan.checkpoint.store);
     this.storeVersion += 1;
-    await this.restoreSourceFiles(checkpoint.sourceFiles);
+    const checkpoint = await this.checkpoints.commitRewind(plan);
     await this.saveCanvas();
     return {
       success: true,
@@ -356,6 +458,17 @@ export class OpenDesignerService {
   }
 
   public async applyOpenBatchFiles(batchId: string): Promise<BatchApplyResult> {
+    const approved = this.approvedChangeset;
+    this.approvedChangeset = null;
+    if (approved) {
+      if (approved.batchId !== batchId) {
+        throw new ApprovalDeniedError("Approved changeset does not match this batch.");
+      }
+      if (approved.ops.length === 0) {
+        throw new BatchError("No file diffs to apply", "NO_FILE_DIFFS");
+      }
+      return await this.batches.commitPrepared(approved);
+    }
     const diffs = await this.batches.previewDiffs(batchId);
     if (diffs.length === 0) {
       throw new BatchError("No file diffs to apply", "NO_FILE_DIFFS");
@@ -408,15 +521,33 @@ export class OpenDesignerService {
     args: Record<string, any> = {},
     options: ExecuteToolOptions = {}
   ): Promise<any> {
-    await this.init();
-    const persistCtx = {
-      autoApprove: this.autoApprove,
-      approvalChannel: options.approvalChannel ?? "model"
-    };
+    return this.enqueueCommand(() => this.executeToolUngated(toolName, args, options));
+  }
 
+  private enqueueCommand<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.commandChain.then(fn, fn);
+    this.commandChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async executeToolUngated(
+    toolName: string,
+    args: Record<string, any> = {},
+    options: ExecuteToolOptions = {}
+  ): Promise<any> {
     try {
+      await this.init();
+      const persistCtx = {
+        autoApprove: this.autoApprove,
+        approvalChannel: options.approvalChannel ?? "model"
+      };
+
+      await this.assertReceipt(toolName, args, persistCtx);
+
       if (PERSISTENCE_TOOL_NAMES.has(toolName)) {
-        assertPersistApproval(toolName, persistCtx, args);
         return await this.executePersistTool(toolName, args);
       }
 
@@ -429,9 +560,12 @@ export class OpenDesignerService {
         store: this.store,
         claims: this.claimRegistry,
         autoApprove: this.autoApprove,
+        approvalGranted: true,
         approvalChannel: options.approvalChannel ?? "model",
         screenshotMode: this.screenshotMode,
-        saveCanvas: () => this.saveCanvas()
+        saveCanvas: async () => {
+          await this.saveCanvas();
+        }
       };
 
       const result = await dispatchMCPTool(toolName, args, context);
@@ -447,17 +581,32 @@ export class OpenDesignerService {
       if (
         err instanceof PathJailError ||
         err instanceof ApprovalRequiredError ||
+        err instanceof ApprovalDeniedError ||
         err instanceof GitRequiredError ||
         err instanceof BatchError ||
         err instanceof GraphError ||
         err instanceof StaleHydrateError ||
-        err instanceof ProjectMismatchError
+        err instanceof ProjectMismatchError ||
+        err instanceof SourcePatchError ||
+        err instanceof ApplyJournalBlockedError ||
+        err instanceof RuntimeBusyError
       ) {
-        return { success: false, error: err.message, code: err.code };
+        return {
+          success: false,
+          error: err.message,
+          code: err.code,
+          ...(err instanceof SourcePatchError && err.ruleMode ? { ruleMode: err.ruleMode } : {})
+        };
       }
       if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
         const code = (err as { code: string }).code;
-        if (code === "NOTHING_TO_REWIND" || code === "CHECKPOINT_NOT_FOUND") {
+        if (
+          code === "NOTHING_TO_REWIND" ||
+          code === "CHECKPOINT_NOT_FOUND" ||
+          code === "CHECKPOINT_UNREADABLE" ||
+          code === "CHECKPOINT_HASH_MISMATCH" ||
+          code === "CHECKPOINT_WORKSPACE_MISMATCH"
+        ) {
           return { success: false, error: err instanceof Error ? err.message : String(err), code };
         }
         if (code === "ENOENT") {
@@ -466,6 +615,354 @@ export class OpenDesignerService {
       }
       throw err;
     }
+  }
+
+  public async issueHostReceipt(tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    return this.enqueueCommand(() => this.issueHostReceiptUngated(tool, args));
+  }
+
+  private async issueHostReceiptUngated(tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    await this.init();
+    const diffHash = await this.toolDiffHash(tool, args);
+    const receipt = await this.approvals.issue({
+      projectId: this.projectId,
+      revision: this.storeVersion,
+      diffHash,
+      tool
+    });
+    return {
+      success: true,
+      approvalReceipt: receipt.id,
+      projectId: receipt.projectId,
+      revision: receipt.revision,
+      diffHash: receipt.diffHash,
+      tool: receipt.tool,
+      expiresAt: receipt.expiresAt,
+      receiptKind: "debug-http",
+      humanApproval: false,
+      note: "Local HTTP can mint a debug receipt. That is not human approval of a seen diff."
+    };
+  }
+
+  public async proposeSourcePatch(input: {
+    elementId: string;
+    instruction: string;
+    live?: boolean;
+  }): Promise<unknown> {
+    await this.init();
+    const element = this.store.getElement(input.elementId);
+    if (!element?.sourceLocation) {
+      throw new SourcePatchError("Selection is not mapped to a source node. Unsupported edits cannot fake-accept.", "NO_SOURCE_NODE");
+    }
+    const instruction = input.instruction.trim();
+    if (!instruction) {
+      throw new SourcePatchError("Write an intent in zh or en before proposing.", "EMPTY_INTENT");
+    }
+    const filePath = element.sourceLocation.filePath;
+    const abs = resolveProjectPath(this.projectRoot, filePath);
+    const sourceCode = await readTextNoFollow(abs);
+    const sourceHash = hashSource(sourceCode);
+    const beforeClassName = typeof element.props.className === "string" ? element.props.className : "";
+    const loc = element.sourceLocation;
+
+    let mergedCode: string | null = null;
+    let liveError: string | undefined;
+    if (input.live !== false && this.aiGateway.mockMode !== true && this.aiGateway.status().hasApiKey) {
+      const result = await this.aiGateway.generateAndApply({
+        sourceCode,
+        instruction: `Apply this visual intent to the JSX node at ${filePath}:${loc.line}:${loc.column}. Return surgical edits of this real file, not a wrapped snippet.\nIntent: ${instruction}`
+      });
+      if (result.success && result.mergedCode && result.fallback !== true) {
+        if (looksLikeFakeButtonWrapper(sourceCode, result.mergedCode)) {
+          liveError = "Model returned a button wrapper instead of a real file patch.";
+        } else {
+          mergedCode = result.mergedCode;
+        }
+      } else {
+        liveError = result.liveError || result.error;
+      }
+    }
+
+    if (!mergedCode) {
+      const intent = parseIntent(instruction);
+      const nextClass = applyIntentToClassName(beforeClassName, intent);
+      if (intent.kind === "unsupported" || nextClass === null) {
+        throw new SourcePatchError(
+          `${liveError || (intent.kind === "unsupported" ? intent.reason : "Unsupported edit.")} currentClassName=${JSON.stringify(beforeClassName)}`,
+          "UNSUPPORTED_EDIT",
+          { ruleMode: intent.kind === "unsupported" ? intent.ruleMode : undefined }
+        );
+      }
+      const patched = classNamePatch({
+        sourceCode,
+        line: loc.line,
+        column: loc.column,
+        newClassName: nextClass
+      });
+      if (!patched.ok) {
+        throw new SourcePatchError(
+          `${patched.reason}. currentClassName=${JSON.stringify(beforeClassName)}`,
+          "UNSUPPORTED_EDIT"
+        );
+      }
+      mergedCode = patched.code;
+    }
+
+    const edits = sliceEdits(sourceCode, mergedCode);
+    const applied = applyBoundEdits(sourceCode, edits);
+    if (!applied.ok) {
+      throw new SourcePatchError(applied.reason, "UNSUPPORTED_EDIT");
+    }
+    const afterClassName = extractClassNameAt(applied.code, loc.line, loc.column) ?? beforeClassName;
+    const proposal: SourcePatchProposal = {
+      id: `cs_${Date.now()}`,
+      instruction,
+      elementId: input.elementId,
+      filePath,
+      sourceHash,
+      afterHash: hashSource(applied.code),
+      baseRevision: this.storeVersion,
+      beforeClassName,
+      afterClassName,
+      edits,
+      preview: unifiedDiff(filePath, sourceCode, applied.code),
+      mergedCode: applied.code
+    };
+    this.pendingProposal = proposal;
+    return {
+      success: true,
+      proposal,
+      visualProof: false
+    };
+  }
+
+  public async acceptSourcePatch(input: { proposalId?: string } = {}): Promise<unknown> {
+    await this.init();
+    const proposal = this.pendingProposal;
+    if (!proposal) {
+      throw new SourcePatchError("No pending source patch.", "NO_PROPOSAL");
+    }
+    if (input.proposalId && input.proposalId !== proposal.id) {
+      throw new SourcePatchError("Proposal id mismatch.", "STALE_PROPOSAL");
+    }
+    const element = this.store.getElement(proposal.elementId);
+    const currentClass = typeof element?.props.className === "string" ? element.props.className : "";
+    if (currentClass !== proposal.beforeClassName) {
+      throw new SourcePatchError("beforeClassName no longer matches the selected node.", "STALE_PROPOSAL");
+    }
+    if (proposal.baseRevision !== this.storeVersion) {
+      throw new SourcePatchError("baseRevision no longer matches the project runtime.", "STALE_PROPOSAL");
+    }
+    const abs = resolveProjectPath(this.projectRoot, proposal.filePath);
+    const current = await readTextNoFollow(abs);
+    if (hashSource(current) !== proposal.sourceHash) {
+      throw new SourcePatchError("sourceHash no longer matches the file on disk.", "STALE_PROPOSAL");
+    }
+    const applied = applyBoundEdits(current, proposal.edits);
+    if (!applied.ok || applied.code !== proposal.mergedCode) {
+      throw new SourcePatchError(applied.ok ? "Patch preview does not match accept payload." : applied.reason, "UNSUPPORTED_EDIT");
+    }
+    await this.rememberSourceBaselines("project_edit", { path: proposal.filePath });
+    await this.pushCheckpoint({ label: "changeset-before-accept", kind: "session" });
+    await writeFileNoFollow(abs, applied.code);
+    this.sessionTouched.add(proposal.filePath);
+    this.reprojectSourceFile(proposal.filePath, applied.code);
+    this.storeVersion += 1;
+    this.pendingProposal = null;
+    await this.pushCheckpoint({ label: "changeset-accept", kind: "session" });
+    await this.saveCanvas();
+    const projected = this.store.getElement(proposal.elementId);
+    return {
+      success: true,
+      filePath: proposal.filePath,
+      preview: proposal.preview,
+      afterClassName: typeof projected?.props.className === "string" ? projected.props.className : proposal.afterClassName,
+      afterHash: proposal.afterHash,
+      projectId: this.projectId,
+      version: this.storeVersion,
+      store: this.store.toJSON()
+    };
+  }
+
+  public async rejectSourcePatch(): Promise<unknown> {
+    this.pendingProposal = null;
+    return { success: true, residue: false, wrote: false };
+  }
+
+  private reprojectSourceFile(rel: string, source: string): void {
+    const snapshot = this.store.toJSON();
+    for (const page of snapshot.pages) {
+      const root = snapshot.byId[page.rootElementId];
+      if (root?.sourceLocation?.filePath === rel) {
+        this.store.removeElement(page.rootElementId);
+      }
+    }
+    const remaining = this.store.toJSON();
+    for (const [id, el] of Object.entries(remaining.byId)) {
+      if (el.sourceLocation?.filePath === rel) this.store.removeElement(id);
+    }
+    const imported = importJsxToElements(source, rel);
+    for (const el of imported.elements) this.store.setElement(el);
+    for (const edge of imported.attachments) this.store.attachChild(edge.parentId, edge.childId);
+    const rootId = imported.rootIds[0];
+    if (rootId) {
+      this.store.addPage({ id: "page-source", name: path.basename(rel), isLoaded: true, rootElementId: rootId });
+      this.store.setActivePage("page-source");
+    }
+  }
+
+  private async importProjectSource(): Promise<void> {
+    const candidates = ["src/App.tsx", "src/app.tsx", "App.tsx", "src/page.tsx"];
+    for (const rel of candidates) {
+      try {
+        const abs = resolveProjectPath(this.projectRoot, rel);
+        const source = await readTextNoFollow(abs);
+        const imported = importJsxToElements(source, rel);
+        if (imported.elements.length === 0) continue;
+        for (const el of imported.elements) this.store.setElement(el);
+        for (const edge of imported.attachments) this.store.attachChild(edge.parentId, edge.childId);
+        const rootId = imported.rootIds[0];
+        if (rootId) {
+          this.store.addPage({ id: "page-source", name: path.basename(rel), isLoaded: true, rootElementId: rootId });
+          this.store.setActivePage("page-source");
+        }
+        return;
+      } catch {
+        // Try the next candidate.
+      }
+    }
+  }
+
+  private async toolDiffHash(tool: string, args: Record<string, unknown>): Promise<string> {
+    if (tool === "batch_apply" && typeof args.batchId === "string") {
+      const frozen = await this.batches.captureFrozen(args.batchId);
+      return hashFrozenChangeset(frozen);
+    }
+    if (tool === "accept_source_patch") {
+      const proposal = this.pendingProposal;
+      return hashDiffPayload([
+        tool,
+        proposal?.id || "",
+        proposal?.filePath || "",
+        proposal?.sourceHash || "",
+        proposal?.afterHash || "",
+        JSON.stringify(proposal?.edits || [])
+      ]);
+    }
+    if (tool === "project_write_batch") {
+      const files = Array.isArray(args.files) ? args.files : [];
+      const parts: Array<string | Buffer> = [tool];
+      for (const file of files as Array<{ path?: string; content?: string }>) {
+        const rel = String(file?.path || "");
+        const after = Buffer.from(String(file?.content ?? ""), "utf8");
+        const before = rel ? await this.pathFingerprint(rel) : "path:none";
+        parts.push(rel, before, contentHash(after));
+      }
+      return hashDiffPayload(parts);
+    }
+    if (tool === "project_copy_asset") {
+      const sourcePath = String(args.sourcePath || args.source || "");
+      const targetPath = String(args.targetPath || args.destination || args.path || "");
+      return hashDiffPayload([
+        tool,
+        sourcePath,
+        targetPath,
+        await this.pathFingerprint(sourcePath),
+        await this.pathFingerprint(targetPath)
+      ]);
+    }
+    if (tool === "project_edit" || tool === "local_edit") {
+      const rel = String(args.path || "");
+      const before = await this.pathFingerprint(rel);
+      let after = "after:none";
+      if (rel) {
+        try {
+          const abs = resolveProjectPath(this.fileIoRoot(), rel);
+          const current = await readTextNoFollow(abs);
+          const applied = applyBoundEdits(current, [
+            {
+              old_string: String(args.old_string || ""),
+              new_string: String(args.new_string || ""),
+              replace_all: Boolean(args.replace_all)
+            }
+          ]);
+          if (applied.ok) after = hashSource(applied.code);
+        } catch {
+          after = "after:unreadable";
+        }
+      }
+      return hashDiffPayload([
+        tool,
+        rel,
+        String(args.old_string || ""),
+        String(args.new_string || ""),
+        args.replace_all === true ? "replace_all" : "replace_one",
+        before,
+        after
+      ]);
+    }
+    const rel = String(args.path || args.batchId || "");
+    const content = typeof args.content === "string" ? args.content : "";
+    return hashDiffPayload([
+      tool,
+      rel,
+      await this.pathFingerprint(rel),
+      content ? contentHash(Buffer.from(content, "utf8")) : "",
+      String(args.old_string || ""),
+      String(args.new_string || ""),
+      args.replace_all === true ? "replace_all" : ""
+    ]);
+  }
+
+  private async pathFingerprint(rel: string): Promise<string> {
+    if (!rel) return "path:none";
+    try {
+      const abs = resolveProjectPath(this.fileIoRoot(), rel);
+      const presence = await readPresence(abs);
+      if (presence.kind === "absent") return "absent";
+      if (presence.kind === "unreadable") return `unreadable:${presence.code}`;
+      return contentHash(presence.bytes);
+    } catch (err) {
+      if (err instanceof PathJailError) return `jail:${err.message}`;
+      return "unreadable:error";
+    }
+  }
+
+  private async assertReceipt(
+    toolName: string,
+    args: Record<string, unknown>,
+    ctx: { autoApprove?: boolean }
+  ): Promise<void> {
+    const persist = PERSISTENCE_TOOL_NAMES.has(toolName);
+    const catalog = OPEN_DESIGNER_TOOLS.find((tool) => tool.name === toolName);
+    const mode = persist
+      ? persistApprovalMode(toolName)
+      : catalog
+        ? catalogApprovalMode(catalog)
+        : "auto";
+    if (mode === "auto") return;
+    if (ctx.autoApprove === true) return;
+    if (toolName === "batch_apply" && typeof args.batchId === "string") {
+      const frozen = await this.batches.captureFrozen(args.batchId);
+      const diffHash = hashFrozenChangeset(frozen);
+      await this.approvals.consume({
+        receiptId: args.approvalReceipt,
+        projectId: this.projectId,
+        revision: this.storeVersion,
+        diffHash,
+        tool: toolName
+      });
+      this.approvedChangeset = cloneFrozenChangeset(frozen);
+      return;
+    }
+    const diffHash = await this.toolDiffHash(toolName, args);
+    await this.approvals.consume({
+      receiptId: args.approvalReceipt,
+      projectId: this.projectId,
+      revision: this.storeVersion,
+      diffHash,
+      tool: toolName
+    });
   }
 
   private async executePersistTool(toolName: string, args: Record<string, any>): Promise<unknown> {
@@ -483,16 +980,20 @@ export class OpenDesignerService {
           checkpoints: this.checkpoints.list(),
           cursor: this.checkpoints.cursor
         };
-      case "autosave":
-        await this.saveCanvas();
+      case "autosave": {
+        const localEditId = typeof args.localEditId === "number" ? args.localEditId : undefined;
+        const saved = await this.saveCanvas(localEditId);
         return {
           success: true,
           path: ".designer/canvas.json",
-          savedAt: this.lastAutosaveAt,
+          savedAt: saved.savedAt,
           projectId: this.projectId,
-          version: this.storeVersion,
+          version: saved.ackRevision,
+          ackRevision: saved.ackRevision,
+          localEditId: saved.localEditId,
           gitCommit: false
         };
+      }
       case "apply_to_project":
         return await this.applyToProject();
       case "batch_create":
@@ -509,6 +1010,18 @@ export class OpenDesignerService {
         };
       case "batch_apply":
         return { success: true, ...(await this.applyOpenBatchFiles(String(args.batchId || ""))) };
+      case "propose_source_patch":
+        return await this.proposeSourcePatch({
+          elementId: String(args.elementId || ""),
+          instruction: String(args.instruction || ""),
+          live: args.live !== false
+        });
+      case "accept_source_patch":
+        return await this.acceptSourcePatch({
+          proposalId: typeof args.proposalId === "string" ? args.proposalId : undefined
+        });
+      case "reject_source_patch":
+        return await this.rejectSourcePatch();
       default:
         throw new Error(`Unknown persistence tool: ${toolName}`);
     }
@@ -535,8 +1048,12 @@ export * from "./mcpTools.ts";
 export * from "./aiGateway.ts";
 export * from "./pathJail.ts";
 export * from "./approval.ts";
+export * from "./approvalReceipt.ts";
+export * from "./applyJournal.ts";
 export * from "./checkpoints.ts";
 export * from "./agentBatch.ts";
 export * from "./persistenceTools.ts";
 export * from "./atomicWrite.ts";
+export * from "./runtimeLock.ts";
+export * from "./frozenChangeset.ts";
 export { GraphError } from "../store/flatStore.ts";

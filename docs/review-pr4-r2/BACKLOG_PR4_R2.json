@@ -1,0 +1,39 @@
+{
+  "date": "2026-09-07",
+  "baseSha": "43fabce1fae7c45e6dbfc3f4b9891116151f9492",
+  "openPr": 4,
+  "idPolicy": "PR4-R2-01…05 refine PR4-Fxx. Never renumber OD/PR3. Do not claim PR3-01…14 all closed.",
+  "gate": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr4-r2/qa/*.test.mjs",
+  "findings": [
+    {
+      "id": "PR4-R2-01",
+      "mapsTo": "B01 B07",
+      "title": "Approved changeset A must not execute B",
+      "acceptance": "After receipt verify, commit the immutable approvedChangeset object. Never re-fetch latest pinned by batchId. Distinct proposals are distinct changeset identities. Consume approval once against that exact object."
+    },
+    {
+      "id": "PR4-R2-02",
+      "mapsTo": "B02",
+      "title": "User edit after last check must survive",
+      "acceptance": "Injection after recordBackup before the managed write is BATCH_CONFLICT. User bytes stay. Single-writer lock plus re-read at write, not another relocated hash check alone."
+    },
+    {
+      "id": "PR4-R2-03",
+      "mapsTo": "B03 B04 B05 B06",
+      "title": "Recovery must not pretend success",
+      "acceptance": "Hashless journals, user delete vs planned write, user create vs planned delete, and truncated neither-hash states BLOCK. File + journal + backups stay. recovered:true is not returned. Weak hashless auto-restore is gone."
+    },
+    {
+      "id": "PR4-R2-04",
+      "mapsTo": "B09 B10",
+      "title": "Checkpoint worktree identity and binary mid-history",
+      "acceptance": "MAIN_SNAPSHOT restore must not clobber BATCH_WORK. Binary mid-checkpoint 81 00 restores; it must not fall back to initial 80 00. Full restore plan is validated before the cursor moves."
+    },
+    {
+      "id": "PR4-R2-05",
+      "mapsTo": "B08",
+      "title": "Negation/multi-constraint shadow intent refuses",
+      "acceptance": "不要去掉阴影，只改圆角 must not drop shadow and must declare rule mode refuse. 不要改颜色，只去掉阴影 still drops shadow only."
+    }
+  ]
+}

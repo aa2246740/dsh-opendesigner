@@ -38,6 +38,9 @@
     "dev": "tsc -w",
     "test": "node --experimental-strip-types --test --test-reporter=spec test/*.ts",
     "test:review": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test --test-reporter=spec docs/review-2026-09-07/qa/*.test.mjs",
+    "test:review:pr3": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test --test-reporter=spec docs/review-pr3/qa/*.test.mjs",
+    "test:review:pr4": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test --test-reporter=spec docs/review-pr4/qa/*.test.mjs",
+    "test:review:pr4r2": "REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test --test-reporter=spec docs/review-pr4-r2/qa/*.test.mjs",
     "preview": "node --experimental-strip-types scripts/preview-server.mjs",
     "prepare": "npm run build"
   },

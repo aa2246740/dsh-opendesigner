@@ -233,5 +233,17 @@ describe("Preview autosave dirty flag (OD-10)", () => {
     assert.equal(autosaveClearsDirty(false, { success: true }), false);
     assert.equal(autosaveClearsDirty(true, { success: false }), false);
     assert.equal(autosaveClearsDirty(true, { success: true }), true);
+    assert.equal(
+      autosaveClearsDirty(true, { success: true, localEditId: 1, ackRevision: 3 }, { localEditId: 2, ackRevision: 3 }),
+      false
+    );
+    assert.equal(
+      autosaveClearsDirty(true, { success: true, localEditId: 2, ackRevision: 4 }, { localEditId: 2, ackRevision: 3 }),
+      false
+    );
+    assert.equal(
+      autosaveClearsDirty(true, { success: true, localEditId: 2, ackRevision: 3 }, { localEditId: 2, ackRevision: 3 }),
+      true
+    );
   });
 });

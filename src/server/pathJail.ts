@@ -3,36 +3,46 @@ import * as path from "node:path";
 
 export class PathJailError extends Error {
   readonly code = "PATH_JAIL";
+  readonly causeCode?: string;
 
-  constructor(message: string) {
+  constructor(message: string, causeCode?: string) {
     super(message);
     this.name = "PathJailError";
+    this.causeCode = causeCode;
   }
 }
 
-function tryRealpath(target: string): string | null {
+function lstatComponent(target: string): fs.Stats | null {
   try {
-    return fs.realpathSync(target);
-  } catch {
-    return null;
+    return fs.lstatSync(target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    if (code === "ENOTDIR") {
+      throw new PathJailError(`path is not a directory: ${target}`, code);
+    }
+    throw new PathJailError(`cannot inspect path (${code ?? "error"}): ${target}`, code);
   }
 }
 
-function realExistingPrefix(target: string): { existing: string; missing: string[] } {
-  const missing: string[] = [];
-  let cursor = path.resolve(target);
-  while (true) {
-    const real = tryRealpath(cursor);
-    if (real) {
-      return { existing: real, missing };
-    }
-    const parent = path.dirname(cursor);
-    if (parent === cursor) {
-      return { existing: cursor, missing };
-    }
-    missing.unshift(path.basename(cursor));
-    cursor = parent;
+function assertNotLink(st: fs.Stats, target: string): void {
+  if (st.isSymbolicLink()) {
+    throw new PathJailError("symlinks and junctions are not allowed on managed paths", "SYMLINK");
   }
+}
+
+export function resolveProjectRoot(projectRoot: string): string {
+  if (typeof projectRoot !== "string" || projectRoot.length === 0) {
+    throw new PathJailError("project root is required");
+  }
+  const resolved = path.resolve(projectRoot);
+  const st = lstatComponent(resolved);
+  if (st === null) return resolved;
+  assertNotLink(st, resolved);
+  if (!st.isDirectory()) {
+    throw new PathJailError("project root is not a directory");
+  }
+  return resolved;
 }
 
 export function resolveProjectPath(projectRoot: string, requested: unknown): string {
@@ -46,16 +56,27 @@ export function resolveProjectPath(projectRoot: string, requested: unknown): str
     throw new PathJailError("absolute paths are not allowed");
   }
 
-  const rootResolved = path.resolve(projectRoot);
-  const root = tryRealpath(rootResolved) ?? rootResolved;
+  const root = resolveProjectRoot(projectRoot);
   const candidate = path.resolve(root, requested);
-  const { existing, missing } = realExistingPrefix(candidate);
-  const resolved = path.resolve(existing, ...missing);
-  const rel = path.relative(root, resolved);
-
+  const rel = path.relative(root, candidate);
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
     throw new PathJailError("path escapes project root");
   }
+  if (rel === "") return root;
 
-  return resolved;
+  const parts = rel.split(path.sep).filter((part) => part.length > 0 && part !== ".");
+  let cursor = root;
+  for (const part of parts) {
+    cursor = path.join(cursor, part);
+    const st = lstatComponent(cursor);
+    if (st === null) continue;
+    assertNotLink(st, cursor);
+  }
+  return cursor;
+}
+
+export function assertManagedPath(abs: string): void {
+  const st = lstatComponent(abs);
+  if (st === null) return;
+  assertNotLink(st, abs);
 }

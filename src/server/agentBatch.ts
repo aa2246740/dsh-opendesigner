@@ -1,9 +1,26 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { atomicWriteJson } from "./atomicWrite.ts";
-import { git, gitHead, isGitRepo } from "./gitExec.ts";
+import { git, gitHead, gitShowBytes, isGitRepo } from "./gitExec.ts";
 import { resolveProjectPath } from "./pathJail.ts";
+import {
+  type FilePresence,
+  contentHash,
+  presenceEqual,
+  readPresence,
+  managedReplace,
+  managedUnlink
+} from "./fileBytes.ts";
+import { ApplyJournal, type ApplyJournalOp } from "./applyJournal.ts";
+import {
+  cloneFrozenChangeset,
+  fileModeOf,
+  fingerprintPresence,
+  hashFrozenChangeset,
+  type FrozenChangeset,
+  type FrozenOp
+} from "./frozenChangeset.ts";
 
 export class GitRequiredError extends Error {
   readonly code = "GIT_REQUIRED";
@@ -116,14 +133,80 @@ function parsePorcelainZ(raw: string): string[] {
   return rels;
 }
 
+function workspaceIdOf(projectRoot: string): string {
+  return createHash("sha256").update(path.resolve(projectRoot)).digest("hex").slice(0, 12);
+}
+
+export function detectThreeWayConflict(input: {
+  kind: "write" | "delete";
+  base: FilePresence;
+  current: FilePresence;
+  candidate: FilePresence;
+}): string | null {
+  if (input.base.kind === "unreadable") {
+    return `base blob unreadable (${input.base.code})`;
+  }
+  if (input.current.kind === "unreadable") {
+    return `current file unreadable (${input.current.code})`;
+  }
+  if (input.kind === "write" && input.candidate.kind === "unreadable") {
+    return `candidate unreadable (${input.candidate.code})`;
+  }
+
+  if (input.kind === "delete") {
+    if (input.current.kind === "absent") return null;
+    if (
+      input.base.kind === "bytes" &&
+      input.current.kind === "bytes" &&
+      !input.base.bytes.equals(input.current.bytes)
+    ) {
+      return "user modified a file the batch deletes";
+    }
+    return null;
+  }
+
+  if (presenceEqual(input.current, input.candidate)) return null;
+
+  if (input.current.kind === "absent") {
+    if (input.base.kind === "bytes") {
+      return "user deleted a file the batch modifies";
+    }
+    return null;
+  }
+
+  if (input.base.kind === "absent") {
+    return "user created a different file at this path";
+  }
+  if (
+    input.base.kind === "bytes" &&
+    input.current.kind === "bytes" &&
+    input.candidate.kind === "bytes" &&
+    !input.base.bytes.equals(input.current.bytes) &&
+    !input.current.bytes.equals(input.candidate.bytes)
+  ) {
+    return "user modified this file concurrently";
+  }
+  return null;
+}
+
 export class AgentBatchRegistry {
   public batches: AgentBatch[] = [];
   private projectRoot: string;
   private filePath: string;
+  private workspaceId: string;
+  private journal: ApplyJournal;
+  private writeChain: Promise<unknown> = Promise.resolve();
+  public beforeManagedWrite?: (abs: string) => Promise<void>;
 
-  constructor(projectRoot: string, filePath: string) {
+  constructor(projectRoot: string, filePath: string, workspaceId?: string) {
     this.projectRoot = projectRoot;
     this.filePath = filePath;
+    this.workspaceId = workspaceId ?? workspaceIdOf(projectRoot);
+    this.journal = new ApplyJournal(
+      projectRoot,
+      this.workspaceId,
+      path.join(path.dirname(filePath), "apply-journal.json")
+    );
   }
 
   public openBatch(): AgentBatch | undefined {
@@ -142,6 +225,7 @@ export class AgentBatchRegistry {
     } catch {
       this.batches = [];
     }
+    await this.journal.recover();
   }
 
   public async persist(): Promise<void> {
@@ -198,86 +282,192 @@ export class AgentBatchRegistry {
     return batch;
   }
 
-  public async apply(batchId: string): Promise<BatchApplyResult> {
+  public async captureFrozen(batchId: string): Promise<FrozenChangeset> {
     const batch = this.requireOpen(batchId);
     const worktreeAbs = resolveProjectPath(this.projectRoot, batch.worktreeRelPath);
-    const copied: string[] = [];
-    const deleted: string[] = [];
     const planned = (await listWorktreeChanges(worktreeAbs, batch.baseRef)).filter((change) => !skipRel(change.rel));
+    const ops: FrozenOp[] = [];
+    const afterBytes: Record<string, Buffer> = {};
 
     for (const change of planned) {
       resolveProjectPath(this.projectRoot, change.rel);
       resolveProjectPath(worktreeAbs, change.rel);
+      const mainPath = resolveProjectPath(this.projectRoot, change.rel);
+      const wtPath = resolveProjectPath(worktreeAbs, change.rel);
+      const current = await readPresence(mainPath);
+      const candidate = change.kind === "delete" ? ({ kind: "absent" } as const) : await readPresence(wtPath);
+      if (change.kind === "write" && candidate.kind !== "bytes") {
+        throw new BatchError(`Candidate missing for ${change.rel}`, "APPLY_FAILED");
+      }
+      const op: FrozenOp = {
+        kind: change.kind,
+        rel: change.rel,
+        mode: change.kind === "write" ? fileModeOf(wtPath) : fileModeOf(mainPath),
+        beforeHash: fingerprintPresence(current),
+        afterHash: fingerprintPresence(candidate)
+      };
+      ops.push(op);
+      if (candidate.kind === "bytes") afterBytes[change.rel] = Buffer.from(candidate.bytes);
     }
 
-    const conflicts: { rel: string; reason: string }[] = [];
-    for (const change of planned) {
-      const reason = await detectConflict({
-        projectRoot: this.projectRoot,
-        worktreeAbs,
-        baseRef: batch.baseRef,
-        change
-      });
-      if (reason) conflicts.push({ rel: change.rel, reason });
-    }
-    if (conflicts.length > 0) {
-      throw new BatchError(
-        `Refusing apply: ${conflicts.length} conflict(s): ${conflicts.map((c) => c.rel).join(", ")}`,
-        "BATCH_CONFLICT"
-      );
-    }
+    const frozen: FrozenChangeset = {
+      projectId: this.workspaceId,
+      worktreeRelPath: batch.worktreeRelPath,
+      batchId: batch.batchId,
+      baseVersion: batch.baseRef,
+      ops,
+      afterBytes
+    };
+    return cloneFrozenChangeset(frozen);
+  }
 
-    const staging = path.join(this.projectRoot, ".designer", "apply-staging", batch.batchId);
+  public async prepareApply(batchId: string): Promise<FrozenChangeset> {
+    await this.journal.recover();
+    this.requireOpen(batchId);
+    const frozen = await this.captureFrozen(batchId);
+    await this.assertFrozenConflicts(batchId, frozen);
+    return frozen;
+  }
+
+  public async commitPrepared(frozen: FrozenChangeset): Promise<BatchApplyResult> {
+    return this.enqueueWrite(() => this.commitPreparedInner(frozen));
+  }
+
+  public async apply(batchId: string): Promise<BatchApplyResult> {
+    return this.enqueueWrite(async () => {
+      await this.journal.recover();
+      this.requireOpen(batchId);
+      const frozen = await this.captureFrozen(batchId);
+      await this.assertFrozenConflicts(batchId, frozen);
+      return await this.commitPreparedInner(frozen);
+    });
+  }
+
+  private enqueueWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeChain.then(fn, fn);
+    this.writeChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async commitPreparedInner(frozen: FrozenChangeset): Promise<BatchApplyResult> {
+    const batch = this.requireOpen(frozen.batchId);
+    const copied: string[] = [];
+    const deleted: string[] = [];
+    const staging = this.journal.stagingDir(batch.batchId);
     await fs.mkdir(staging, { recursive: true });
-    const backups: { rel: string; backup: string | null }[] = [];
+    const planned: ApplyJournalOp[] = frozen.ops.map((op) => ({
+      kind: op.kind,
+      rel: op.rel,
+      mode: op.mode,
+      beforeHash: op.beforeHash,
+      afterHash: op.afterHash
+    }));
+    const entry = await this.journal.begin(batch.batchId, planned);
 
     try {
-      for (const change of planned) {
-        const to = path.join(this.projectRoot, change.rel);
-        let backup: string | null = null;
-        try {
-          const st = await fs.lstat(to);
-          if (st.isDirectory()) {
-            throw new BatchError(`Cannot overwrite directory: ${change.rel}`, "APPLY_FAILED");
-          }
-          backup = path.join(staging, change.rel);
-          await fs.mkdir(path.dirname(backup), { recursive: true });
-          await fs.copyFile(to, backup);
-        } catch (err) {
-          if (err instanceof BatchError) throw err;
-          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      for (const op of frozen.ops) {
+        const to = resolveProjectPath(this.projectRoot, op.rel);
+        const current = await readPresence(to);
+        const nowHash = fingerprintPresence(current);
+        if (nowHash !== op.beforeHash) {
+          throw new BatchError(
+            `Refusing apply: ${op.rel} changed after preflight (expected-before mismatch)`,
+            "BATCH_CONFLICT"
+          );
         }
-        backups.push({ rel: change.rel, backup });
+        let backupRel: string | null = null;
+        if (current.kind === "bytes") {
+          backupRel = await this.journal.backupFile(staging, op.rel, to);
+        } else if (current.kind === "unreadable") {
+          throw new BatchError(`Cannot apply over ${op.rel}: ${current.message}`, "APPLY_FAILED");
+        }
+        await this.journal.recordBackup(entry, op.rel, backupRel, {
+          beforeHash: op.beforeHash,
+          afterHash: op.afterHash
+        });
 
-        if (change.kind === "delete") {
-          await fs.rm(to, { force: true });
-          deleted.push(change.rel);
-          continue;
+        if (this.beforeManagedWrite) {
+          await this.beforeManagedWrite(to);
         }
-        const from = path.join(worktreeAbs, change.rel);
-        await fs.mkdir(path.dirname(to), { recursive: true });
-        await fs.copyFile(from, to);
-        copied.push(change.rel);
+
+        try {
+          if (op.kind === "delete") {
+            await managedUnlink(to, op.beforeHash);
+            deleted.push(op.rel);
+            continue;
+          }
+          const bytes = frozen.afterBytes[op.rel];
+          if (!bytes) {
+            throw new BatchError(`Frozen candidate missing for ${op.rel}`, "APPLY_FAILED");
+          }
+          const pinnedBytes = Buffer.from(bytes);
+          if (op.afterHash && contentHash(pinnedBytes) !== op.afterHash) {
+            throw new BatchError(`Frozen candidate hash mismatch for ${op.rel}`, "APPLY_FAILED");
+          }
+          await managedReplace(to, op.beforeHash, pinnedBytes);
+          if (typeof op.mode === "number") {
+            await fs.chmod(to, op.mode);
+          }
+          copied.push(op.rel);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message.startsWith("BATCH_CONFLICT:")) {
+            throw new BatchError(
+              `Refusing apply: ${op.rel} changed after preflight (expected-before mismatch)`,
+              "BATCH_CONFLICT"
+            );
+          }
+          throw err;
+        }
       }
     } catch (err) {
-      for (const item of [...backups].reverse()) {
-        const to = path.join(this.projectRoot, item.rel);
-        if (item.backup) {
-          await fs.mkdir(path.dirname(to), { recursive: true });
-          await fs.copyFile(item.backup, to);
-        } else {
-          await fs.rm(to, { force: true });
-        }
+      try {
+        await this.journal.recover();
+      } catch (recErr) {
+        if (err instanceof BatchError && err.code === "BATCH_CONFLICT") throw err;
+        throw recErr;
       }
-      await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
       throw err;
     }
 
+    await this.journal.commit(entry);
     await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
     await this.removeWorktree(batch);
     batch.status = "applied";
     await this.persist();
-    return { batchId, status: batch.status, copied, deleted };
+    return { batchId: frozen.batchId, status: batch.status, copied, deleted };
+  }
+
+  private async assertFrozenConflicts(batchId: string, frozen: FrozenChangeset): Promise<void> {
+    const batch = this.requireOpen(batchId);
+    const conflicts: { rel: string; reason: string }[] = [];
+    for (const op of frozen.ops) {
+      const mainPath = resolveProjectPath(this.projectRoot, op.rel);
+      const current = await readPresence(mainPath);
+      const base = await gitShowBytes(this.projectRoot, batch.baseRef, op.rel);
+      const candidate: FilePresence =
+        op.kind === "delete"
+          ? { kind: "absent" }
+          : frozen.afterBytes[op.rel]
+            ? { kind: "bytes", bytes: frozen.afterBytes[op.rel] }
+            : { kind: "absent" };
+      const reason = detectThreeWayConflict({
+        kind: op.kind,
+        base,
+        current,
+        candidate
+      });
+      if (reason) conflicts.push({ rel: op.rel, reason });
+    }
+    if (conflicts.length > 0) {
+      throw new BatchError(
+        `Refusing apply: ${conflicts.length} conflict(s): ${conflicts.map((c) => `${c.rel} (${c.reason})`).join(", ")}`,
+        "BATCH_CONFLICT"
+      );
+    }
   }
 
   public async previewDiffs(batchId: string): Promise<{ rel: string; kind: "write" | "delete" }[]> {
@@ -288,6 +478,11 @@ export class AgentBatchRegistry {
 
   public worktreeAbs(batch: AgentBatch): string {
     return resolveProjectPath(this.projectRoot, batch.worktreeRelPath);
+  }
+
+  public async diffHash(batchId: string): Promise<string> {
+    const frozen = await this.captureFrozen(batchId);
+    return hashFrozenChangeset(frozen);
   }
 
   private requireOpen(batchId: string): AgentBatch {
@@ -328,56 +523,6 @@ async function assertNoDirtyProject(cwd: string): Promise<void> {
       "DIRTY_WORKTREE"
     );
   }
-}
-
-async function readOptional(filePath: string): Promise<string | null> {
-  try {
-    const st = await fs.lstat(filePath);
-    if (st.isDirectory()) return null;
-    return await fs.readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-async function gitShow(cwd: string, ref: string, rel: string): Promise<string | null> {
-  try {
-    const { stdout } = await git(cwd, ["show", `${ref}:${rel}`]);
-    return stdout;
-  } catch {
-    return null;
-  }
-}
-
-async function detectConflict(input: {
-  projectRoot: string;
-  worktreeAbs: string;
-  baseRef: string;
-  change: WorktreeChange;
-}): Promise<string | null> {
-  const mainPath = path.join(input.projectRoot, input.change.rel);
-  const wtPath = path.join(input.worktreeAbs, input.change.rel);
-  const base = await gitShow(input.projectRoot, input.baseRef, input.change.rel);
-  const main = await readOptional(mainPath);
-
-  if (input.change.kind === "delete") {
-    if (main === null) return null;
-    if (base !== null && main !== base) {
-      return "user modified a file the batch deletes";
-    }
-    return null;
-  }
-
-  const wt = await readOptional(wtPath);
-  if (main === wt) return null;
-  if (main === null) return null;
-  if (base === null && main !== wt) {
-    return "user created a different file at this path";
-  }
-  if (base !== null && main !== base && main !== wt) {
-    return "user modified this file concurrently";
-  }
-  return null;
 }
 
 export async function listWorktreeChanges(worktreeAbs: string, baseRef: string): Promise<WorktreeChange[]> {

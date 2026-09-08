@@ -588,10 +588,28 @@ var OpenDesignerPreview = (() => {
       if (!Array.isArray(children)) {
         throw new GraphError(`childrenByParent.${parentId} must be an array`);
       }
+      const seen = /* @__PURE__ */ new Set();
       for (const childId of children) {
         if (!byId[childId]) {
           throw new GraphError(`Missing child node ${childId} under ${parentId}`);
         }
+        if (seen.has(childId)) {
+          throw new GraphError(`Duplicate child ${childId} under ${parentId}`);
+        }
+        seen.add(childId);
+        if (parentByChild[childId] !== parentId) {
+          throw new GraphError(`parent/child maps disagree for ${childId}`);
+        }
+      }
+    }
+    const claimedParent = /* @__PURE__ */ new Map();
+    for (const [parentId, children] of Object.entries(childrenByParent)) {
+      for (const childId of children) {
+        const previous = claimedParent.get(childId);
+        if (previous && previous !== parentId) {
+          throw new GraphError(`child ${childId} has multiple parents`);
+        }
+        claimedParent.set(childId, parentId);
       }
     }
     for (const [childId, parentId] of Object.entries(parentByChild)) {
@@ -600,6 +618,10 @@ var OpenDesignerPreview = (() => {
       }
       if (!byId[parentId]) {
         throw new GraphError(`parentByChild references missing parent ${parentId}`);
+      }
+      const siblings = childrenByParent[parentId];
+      if (!Array.isArray(siblings) || !siblings.includes(childId)) {
+        throw new GraphError(`parent/child maps disagree for ${childId}`);
       }
     }
     const visiting = /* @__PURE__ */ new Set();
@@ -622,6 +644,11 @@ var OpenDesignerPreview = (() => {
     for (const page of pages) {
       if (!page || typeof page.rootElementId !== "string" || !byId[page.rootElementId]) {
         throw new GraphError(`Dangling page root ${page?.rootElementId ?? "(missing)"}`);
+      }
+    }
+    if (data.activePageId) {
+      if (!pages.some((page) => page.id === data.activePageId)) {
+        throw new GraphError(`active page ${data.activePageId} is not in pages`);
       }
     }
   }
@@ -811,6 +838,9 @@ var OpenDesignerPreview = (() => {
       return this.state.pages.map((page) => ({ ...page }));
     }
     setActivePage(pageId) {
+      if (!this.state.pages.some((page) => page.id === pageId)) {
+        throw new GraphError(`active page ${pageId} is not in pages`);
+      }
       this.state.activePageId = pageId;
     }
     getActivePageId() {
@@ -1349,7 +1379,64 @@ var OpenDesignerPreview = (() => {
   var Geist_Mono = createGoogleFontStub("Geist_Mono", "--font-geist-mono");
 
   // src/client/sandbox.ts
-  var SANDBOX_CSP = "default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'";
+  var SANDBOX_CSP = "default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src 'self' data: https:; script-src 'none'; connect-src 'none'; object-src 'none'";
+  var CANVAS_TRUSTED_CSS = `
+html,body{font-family:ui-sans-serif,system-ui,sans-serif;}
+.min-h-screen{min-height:100vh;}
+.bg-slate-950{background-color:rgb(2,6,23);}
+.bg-slate-900{background-color:rgb(15,23,42);}
+.bg-indigo-600{background-color:rgb(79,70,229);}
+.bg-emerald-600{background-color:rgb(5,150,105);}
+.bg-rose-600{background-color:rgb(225,29,72);}
+.bg-amber-400{background-color:rgb(251,191,36);}
+.text-slate-100{color:rgb(241,245,249);}
+.text-slate-400{color:rgb(148,163,184);}
+.text-white{color:rgb(255,255,255);}
+.text-emerald-400{color:rgb(52,211,153);}
+.text-slate-900{color:rgb(15,23,42);}
+.text-2xl{font-size:1.5rem;line-height:2rem;}
+.text-xl{font-size:1.25rem;line-height:1.75rem;}
+.text-sm{font-size:0.875rem;line-height:1.25rem;}
+.text-xs{font-size:0.75rem;line-height:1rem;}
+.font-bold{font-weight:700;}
+.font-semibold{font-weight:600;}
+.tracking-tight{letter-spacing:-0.025em;}
+.leading-relaxed{line-height:1.625;}
+.p-8{padding:2rem;}
+.p-6{padding:1.5rem;}
+.px-4{padding-left:1rem;padding-right:1rem;}
+.py-2{padding-top:0.5rem;padding-bottom:0.5rem;}
+.mt-2{margin-top:0.5rem;}
+.mt-4{margin-top:1rem;}
+.mt-6{margin-top:1.5rem;}
+.rounded-lg{border-radius:0.5rem;}
+.rounded-xl{border-radius:0.75rem;}
+.rounded-2xl{border-radius:1rem;}
+.rounded-full{border-radius:9999px;}
+.shadow-md{box-shadow:0 4px 6px -1px rgb(0 0 0 / 0.1),0 2px 4px -2px rgb(0 0 0 / 0.1);}
+.shadow-lg{box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1),0 4px 6px -4px rgb(0 0 0 / 0.1);}
+.shadow-xl{box-shadow:0 20px 25px -5px rgb(0 0 0 / 0.1),0 8px 10px -6px rgb(0 0 0 / 0.1);}
+.border-2{border-width:2px;border-style:solid;}
+.border{border-width:1px;border-style:solid;}
+.border-indigo-500{border-color:rgb(99,102,241);}
+.w-\\[380px\\]{width:380px;}
+.inline-flex{display:inline-flex;}
+`.trim();
+  function collectTrustedCanvasCss(doc) {
+    const chunks = [CANVAS_TRUSTED_CSS];
+    const target = doc ?? (typeof document !== "undefined" ? document : void 0);
+    if (!target) return chunks.join("\n");
+    for (const sheet of Array.from(target.styleSheets)) {
+      try {
+        chunks.push(...Array.from(sheet.cssRules).map((rule) => rule.cssText));
+      } catch {
+      }
+    }
+    return chunks.join("\n");
+  }
+  function sanitizeCss(css) {
+    return css.replace(/<\/style/gi, "<\\/style");
+  }
   var ALLOWED_TAGS = /* @__PURE__ */ new Set([
     "a",
     "abbr",
@@ -1463,11 +1550,12 @@ var OpenDesignerPreview = (() => {
     if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return true;
     return false;
   }
-  function wrapSandboxSrcdoc(inner) {
-    return `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"></head><body style="margin:0;background:transparent;">${inner}</body></html>`;
+  function wrapSandboxSrcdoc(inner, options = {}) {
+    const css = sanitizeCss(options.css ?? CANVAS_TRUSTED_CSS);
+    return `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"><style>${css}</style></head><body style="margin:0;background:transparent;">${inner}</body></html>`;
   }
-  function sandboxIframeMarkup(inner) {
-    const srcdoc = wrapSandboxSrcdoc(inner).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+  function sandboxIframeMarkup(inner, options = {}) {
+    const srcdoc = wrapSandboxSrcdoc(inner, options).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
     return `<iframe class="od-sandbox-frame" data-testid="component-sandbox" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${srcdoc}" style="border:0;width:100%;height:100%;pointer-events:none;background:transparent;position:absolute;inset:0;"></iframe>`;
   }
   var ComponentSandbox = class {
@@ -2235,7 +2323,7 @@ var OpenDesignerPreview = (() => {
       return [
         `<div class="opendesigner-canvas-container" data-testid="canvas-container" style="position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">`,
         `  <div class="canvas-viewport-layer" data-testid="canvas-viewport-layer" style="transform-origin:0 0;transform:${transformStyle};position:absolute;top:0;left:0;width:100%;height:100%;">`,
-        `    ${sandboxIframeMarkup(elementsHtml.join("\n    "))}`,
+        `    ${sandboxIframeMarkup(elementsHtml.join("\n    "), { css: collectTrustedCanvasCss() })}`,
         `    <div class="canvas-overlay-host" data-testid="canvas-overlay" style="pointer-events:none;position:absolute;inset:0;">${overlaySvg}</div>`,
         `  </div>`,
         `</div>`
@@ -2535,9 +2623,23 @@ var OpenDesignerPreview = (() => {
   }
 
   // src/client/previewApp.ts
-  function autosaveClearsDirty(httpOk, result) {
-    return httpOk && result?.success !== false;
+  function autosaveClearsDirty(httpOk, result, expected) {
+    if (!httpOk || result?.success === false) return false;
+    if (expected?.localEditId !== void 0 && result?.localEditId !== expected.localEditId) return false;
+    if (expected?.ackRevision !== void 0 && result?.ackRevision !== expected.ackRevision) return false;
+    return true;
   }
+  var GATED_TOOLS = /* @__PURE__ */ new Set([
+    "apply_to_project",
+    "batch_apply",
+    "project_write",
+    "project_write_batch",
+    "project_edit",
+    "project_delete",
+    "local_write",
+    "local_edit",
+    "accept_source_patch"
+  ]);
   var CARD_ID = "hero-card";
   var BADGE_ID = "status-badge";
   var TITLE_ID = "hero-title";
@@ -2617,10 +2719,6 @@ var OpenDesignerPreview = (() => {
   function listElementIds(store) {
     return Object.keys(store.toJSON().byId);
   }
-  function extractClassName(code) {
-    const match = code.match(/className="([^"]*)"/);
-    return match ? match[1] : null;
-  }
   function swatchButtons(prefix, values, kind) {
     return values.map((value) => {
       const colorClass = `bg-${value}`;
@@ -2637,6 +2735,8 @@ var OpenDesignerPreview = (() => {
     let proposal = null;
     let hasLiveModel = false;
     let fileDiffCount = 0;
+    let pendingEditId = 0;
+    let saveQueue = Promise.resolve();
     function syncGeometry() {
       panel.clearRegisteredRects();
       for (const [id, el] of Object.entries(store.toJSON().byId)) {
@@ -2644,9 +2744,6 @@ var OpenDesignerPreview = (() => {
           panel.registerElement(id, el.canvasRect, el);
         }
       }
-    }
-    function markDirty() {
-      dirty = true;
     }
     root.innerHTML = `
     <div class="od-shell">
@@ -2687,6 +2784,8 @@ var OpenDesignerPreview = (() => {
             <button type="button" data-testid="ai-propose" id="od-ai-propose" data-tooltip="Propose a scoped ChangeSet. Does not write until you accept.">\u63D0\u51FA\u4FEE\u6539</button>
             <button type="button" data-testid="ai-accept" id="od-ai-accept" disabled data-tooltip="Accept the proposal and checkpoint">\u63A5\u53D7</button>
             <button type="button" data-testid="ai-reject" id="od-ai-reject" disabled data-tooltip="Reject with no residue">\u62D2\u7EDD</button>
+          </div>
+          <div class="od-hint" data-testid="receipt-kind">Local HTTP debug receipts are not human approval of a seen diff. Accept binds the exact diff hash. Reject writes nothing.</div>
           </div>
           <div class="od-styles-title">Save / Rewind</div>
           <div id="od-autosave" class="od-mono" data-testid="autosave-indicator">working copy: pending</div>
@@ -2735,8 +2834,8 @@ var OpenDesignerPreview = (() => {
       acceptBtn.disabled = !proposal;
       rejectBtn.disabled = !proposal;
       applyFilesBtn.disabled = !openBatchId || fileDiffCount === 0;
-      proposeBtn.disabled = !hasLiveModel;
-      proposeBtn.title = hasLiveModel ? "Propose a scoped ChangeSet" : "No live model configured. Local style edits still work.";
+      proposeBtn.disabled = false;
+      proposeBtn.title = hasLiveModel ? "Propose a structured patch of the selected source node" : "Supported zh/en intents map onto a real source patch. Live model is used when configured.";
     }
     function updateHud() {
       const ids = panel.selection.getSelectedIds();
@@ -2806,7 +2905,6 @@ var OpenDesignerPreview = (() => {
       const persistence = status.persistence || {};
       const ai = status.ai || {};
       projectId = typeof status.projectId === "string" ? status.projectId : projectId;
-      if (typeof status.storeVersion === "number") lastSeenVersion = status.storeVersion;
       hasLiveModel = ai.hasApiKey === true && ai.mockMode !== true;
       statusEl.textContent = `plugin ${status.name} | project ${projectId || "\u2014"} v${lastSeenVersion} | jail ${status.projectRoot} | ai ${ai.provider || "none"}/${ai.model || "none"} hasApiKey=${ai.hasApiKey === true}`;
       autosaveEl.textContent = `working copy ${persistence.lastAutosaveAt || "none"} | checkpoints ${persistence.checkpointCount ?? 0} | current ${persistence.currentCheckpointLabel || "none"} | dirty=${dirty}`;
@@ -2824,7 +2922,6 @@ var OpenDesignerPreview = (() => {
       const payload = {
         ...store.toJSON(),
         projectId,
-        version: lastSeenVersion + 1,
         baseVersion: lastSeenVersion
       };
       try {
@@ -2858,12 +2955,23 @@ var OpenDesignerPreview = (() => {
       await refreshStatus();
       return result;
     }
+    function markDirty() {
+      dirty = true;
+      pendingEditId += 1;
+    }
     async function checkpointAndAutosave(label) {
       markDirty();
-      const cp = await callTool("checkpoint", { label, kind: "canvas" });
-      if (cp.success === false) return;
-      const auto = await callTool("autosave");
-      if (autosaveClearsDirty(true, auto)) dirty = false;
+      const editId = pendingEditId;
+      const work = async () => {
+        const cp = await callTool("checkpoint", { label, kind: "canvas" });
+        if (cp.success === false) return;
+        const auto = await callTool("autosave", { localEditId: editId });
+        if (autosaveClearsDirty(true, auto, { localEditId: editId, ackRevision: lastSeenVersion })) {
+          dirty = pendingEditId !== editId ? true : false;
+        }
+      };
+      saveQueue = saveQueue.then(work, work);
+      await saveQueue;
     }
     function applyStyle(property, value, label) {
       const id = selectedId();
@@ -2966,7 +3074,7 @@ var OpenDesignerPreview = (() => {
       }
     });
     root.querySelector("#od-save-design").addEventListener("click", () => {
-      void callTool("apply_to_project", { approve: true });
+      void callTool("apply_to_project");
     });
     root.querySelector("#od-apply-files").addEventListener("click", async () => {
       if (!openBatchId || fileDiffCount === 0) {
@@ -2976,7 +3084,7 @@ var OpenDesignerPreview = (() => {
         });
         return;
       }
-      const result = await callTool("batch_apply", { batchId: openBatchId, approve: true });
+      const result = await callTool("batch_apply", { batchId: openBatchId });
       if (result.success === true) {
         openBatchId = null;
         fileDiffCount = 0;
@@ -2998,8 +3106,7 @@ var OpenDesignerPreview = (() => {
         return;
       }
       void callTool("project_write_batch", {
-        files: [{ path: BATCH_FILE, content: "agent-batch isolation write\n" }],
-        approve: true
+        files: [{ path: BATCH_FILE, content: "agent-batch isolation write\n" }]
       });
     });
     root.querySelector("#od-batch-discard").addEventListener("click", async () => {
@@ -3013,76 +3120,64 @@ var OpenDesignerPreview = (() => {
       syncProposalButtons();
     });
     proposeBtn.addEventListener("click", async () => {
-      if (!hasLiveModel) {
-        aiBannerEl.textContent = "Model path gated: no live provider. Use local style edits.";
-        aiEl.textContent = "\u63D0\u51FA\u4FEE\u6539 is disabled until a live model is configured.";
+      const id = selectedId();
+      if (!id) {
+        aiEl.textContent = "Select a region that maps to a source node before proposing.";
         return;
       }
-      if (!api.applyAiMerge) {
-        aiEl.textContent = "AI merge endpoint is not attached.";
-        return;
-      }
-      const id = selectedId() || BTN_ID;
-      if (!selectedId()) panel.select([id]);
       const instruction = intentEl.value.trim();
       if (!instruction) {
         aiEl.textContent = "Write an intent in zh or en before proposing.";
         return;
       }
-      const before = classNameOf(store, id);
-      const source = `<button className="${before}">${store.getElement(id)?.textContent || ""}</button>`;
-      const result = await api.applyAiMerge(source, instruction);
-      const attempts = (result.attemptsLog || []).map((row) => `${row.label || row.provider} HTTP ${row.httpStatus ?? "err"} ${row.ok ? "ok" : "fail"}`).join("\n");
-      if (result.success && result.mergedCode && result.fallback !== true && result.mockMode !== true) {
-        const after = extractClassName(result.mergedCode) || before;
-        proposal = {
-          id: `cs_${Date.now()}`,
-          instruction,
-          elementId: id,
-          beforeClassName: before,
-          afterClassName: after,
-          mergedCode: result.mergedCode
-        };
-        aiBannerEl.textContent = `proposal ready provider=${result.provider || "unknown"} model=${result.model || "unknown"}`;
+      const result = await callTool("propose_source_patch", { elementId: id, instruction });
+      if (result.success && result.proposal && typeof result.proposal === "object") {
+        proposal = result.proposal;
+        aiBannerEl.textContent = `proposal ${proposal.id} file=${proposal.filePath} hash=${proposal.sourceHash.slice(0, 8)}`;
         aiEl.textContent = `${aiBannerEl.textContent}
 intent: ${instruction}
-before: ${before}
-after: ${after}
-${attempts}
-Accept to apply. Reject to drop.`;
+before: ${proposal.beforeClassName}
+after: ${proposal.afterClassName}
+diffHash bind: ${proposal.afterHash || proposal.sourceHash}
+${proposal.preview}
+Accept writes this file. Reject leaves the repo unchanged.`;
         syncProposalButtons();
         return;
       }
       proposal = null;
       syncProposalButtons();
-      if (result.success && result.fallback) {
-        aiBannerEl.textContent = "live failed; mock is not applied";
-        aiEl.textContent = `live failed: ${result.liveError || "provider error"}
-${attempts}`;
+      aiBannerEl.textContent = "AI propose failed";
+      aiEl.textContent = String(result.error || "propose failed");
+    });
+    acceptBtn.addEventListener("click", async () => {
+      if (!proposal) return;
+      const accepted = proposal;
+      const result = await callTool("accept_source_patch", { proposalId: accepted.id });
+      if (result.success === false) {
+        aiEl.textContent = `Accept refused: ${String(result.error || "stale or unsupported")}`;
         return;
       }
-      aiBannerEl.textContent = "AI propose failed";
-      aiEl.textContent = `${result.error || "AI merge failed"}
-${attempts}`;
-    });
-    acceptBtn.addEventListener("click", () => {
-      if (!proposal) return;
-      setClassName(store, proposal.elementId, proposal.afterClassName);
-      const accepted = proposal;
+      if (result.store && typeof result.store === "object") {
+        store.fromJSON(result.store);
+      } else {
+        const el = store.getElement(accepted.elementId);
+        if (el) {
+          el.props = { ...el.props, className: accepted.afterClassName };
+          store.setElement(el);
+        }
+      }
       proposal = null;
       render();
-      void checkpointAndAutosave("changeset-accept");
-      aiEl.textContent = `Accepted ${accepted.id}. Rewind undoes it.`;
+      aiEl.textContent = `Accepted ${accepted.id}. Wrote ${accepted.filePath}. Rewind restores the file.`;
       syncProposalButtons();
     });
-    rejectBtn.addEventListener("click", () => {
+    rejectBtn.addEventListener("click", async () => {
       if (!proposal) return;
-      const before = classNameOf(store, proposal.elementId);
-      clearProposal("Rejected. Store unchanged.");
-      if (before !== proposal?.beforeClassName) {
-      }
-      void before;
+      await callTool("reject_source_patch");
+      proposal = null;
       aiBannerEl.textContent = "ChangeSet rejected with no residue";
+      aiEl.textContent = "Rejected. Store and repo unchanged. No write.";
+      syncProposalButtons();
       render();
     });
     root.querySelector("#od-insert-box").addEventListener("click", () => insertBox());
@@ -3111,16 +3206,21 @@ ${attempts}`;
     bindFloatingTooltips(root);
     window.setInterval(() => {
       if (!dirty) return;
-      void (async () => {
-        const result = await callTool("autosave");
-        if (autosaveClearsDirty(true, result)) dirty = false;
-      })();
+      const editId = pendingEditId;
+      const work = async () => {
+        const result = await callTool("autosave", { localEditId: editId });
+        if (autosaveClearsDirty(true, result, { localEditId: editId, ackRevision: lastSeenVersion })) {
+          dirty = pendingEditId !== editId ? true : false;
+        }
+      };
+      saveQueue = saveQueue.then(work, work);
     }, 8e3);
     void (async () => {
       if (!api.getStatus) {
         statusEl.textContent = "standalone preview (no DSH host)";
         seedStore(store);
-        panel.select([CARD_ID]);
+        const ids = listElementIds(store);
+        panel.select(ids.slice(0, 1));
         render();
         return;
       }
@@ -3139,13 +3239,16 @@ ${attempts}`;
           seedStore(store);
           await checkpointAndAutosave("seed");
         }
-        panel.select([CARD_ID]);
+        const ids = listElementIds(store);
+        const button = ids.find((id) => store.getElement(id)?.tag === "button") || ids[0];
+        if (button) panel.select([button]);
         await refreshStatus();
         render();
       } catch (err) {
         statusEl.textContent = `status unavailable: ${err instanceof Error ? err.message : String(err)}`;
         seedStore(store);
-        panel.select([CARD_ID]);
+        const ids = listElementIds(store);
+        panel.select(ids.slice(0, 1));
         render();
       }
     })();
@@ -3177,10 +3280,27 @@ ${attempts}`;
           return body;
         },
         callTool: async (tool, args = {}) => {
+          let payloadArgs = { ...args };
+          if (GATED_TOOLS.has(tool)) {
+            const issued = await fetch("/api/approval", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ tool, args: payloadArgs })
+            });
+            const receipt = await issued.json().catch(() => ({ success: false }));
+            if (!issued.ok || receipt.success === false || typeof receipt.approvalReceipt !== "string") {
+              return { success: false, error: receipt.error || "DENIED: no approval receipt", code: "DENIED" };
+            }
+            const persistHost = document.getElementById("od-persist");
+            if (persistHost) {
+              persistHost.textContent = `debug receipt (${String(receipt.receiptKind || "debug-http")}) \u2260 human approval of seen diff. tool=${tool} diffHash=${String(receipt.diffHash || "").slice(0, 16)}`;
+            }
+            payloadArgs = { ...payloadArgs, approvalReceipt: receipt.approvalReceipt };
+          }
           const res = await fetch("/api/tool", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tool, args })
+            body: JSON.stringify({ tool, args: payloadArgs })
           });
           if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
           return await res.json();

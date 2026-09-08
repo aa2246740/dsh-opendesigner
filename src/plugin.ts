@@ -8,12 +8,45 @@ import {
 import { OpenDesignerService, type OpenDesignerConfig } from "./server/index.ts";
 import { detectAiConfigFromEnv } from "./server/aiGateway.ts";
 import { OPEN_DESIGNER_TOOLS } from "./server/mcpTools.ts";
-import { PERSISTENCE_TOOLS } from "./server/persistenceTools.ts";
+import { PERSISTENCE_TOOL_NAMES, PERSISTENCE_TOOLS } from "./server/persistenceTools.ts";
+import { catalogApprovalMode, persistApprovalMode } from "./server/approval.ts";
 
 export const name = "dsh-opendesigner";
 export const inject = ["tools"];
 
 export interface Config extends OpenDesignerConfig {}
+
+function shortToolName(fullName: string): string | null {
+  if (!fullName.startsWith("opendesigner_")) return null;
+  return fullName.slice("opendesigner_".length);
+}
+
+function isGatedOpenDesignerTool(fullName: string): boolean {
+  const short = shortToolName(fullName);
+  if (!short) return false;
+  if (PERSISTENCE_TOOL_NAMES.has(short)) return persistApprovalMode(short) === "gated";
+  const catalog = OPEN_DESIGNER_TOOLS.find((tool) => tool.name === short);
+  return catalog ? catalogApprovalMode(catalog) === "gated" : false;
+}
+
+function wireHostAsk(ctx: DshHostContext, service: OpenDesignerService): boolean {
+  if (typeof ctx.on !== "function") return false;
+  ctx.on("tools/pre-execute", async (exec: unknown, next: unknown) => {
+    const payload = exec as { name?: string; args?: Record<string, unknown> };
+    const proceed = typeof next === "function" ? (next as () => Promise<unknown>) : async () => ({ kind: "allow" });
+    if (service.autoApprove) return await proceed();
+    const name = String(payload?.name || "");
+    if (!isGatedOpenDesignerTool(name)) return await proceed();
+    if (typeof payload.args?.approvalReceipt === "string" && payload.args.approvalReceipt.length > 0) {
+      return await proceed();
+    }
+    return {
+      kind: "ask",
+      reason: `OpenDesigner ${name} is destructive. The host must grant a one-shot approval; approve:true is ignored.`
+    };
+  });
+  return true;
+}
 
 export function apply(ctx: DshHostContext, config: Config = {}): OpenDesignerService {
   const service = new OpenDesignerService({
@@ -24,6 +57,7 @@ export function apply(ctx: DshHostContext, config: Config = {}): OpenDesignerSer
     }
   });
   void service.init();
+  const dshAskWired = wireHostAsk(ctx, service);
   const tools = ctx.tools;
   const register =
     typeof tools?.register === "function"
@@ -37,6 +71,7 @@ export function apply(ctx: DshHostContext, config: Config = {}): OpenDesignerSer
   }
 
   for (const tool of [...OPEN_DESIGNER_TOOLS, ...PERSISTENCE_TOOLS]) {
+    const gated = isGatedOpenDesignerTool(`opendesigner_${tool.name}`);
     register(
       wrapDefineTool({
         name: `opendesigner_${tool.name}`,
@@ -48,7 +83,21 @@ export function apply(ctx: DshHostContext, config: Config = {}): OpenDesignerSer
             throw new Error("opendesigner tool aborted");
           }
           await service.init();
-          return await service.executeTool(tool.name, args);
+          let toolArgs = { ...args };
+          if (
+            dshAskWired &&
+            gated &&
+            !service.autoApprove &&
+            typeof toolArgs.approvalReceipt !== "string"
+          ) {
+            const issued = (await service.issueHostReceipt(tool.name, toolArgs)) as {
+              approvalReceipt?: string;
+            };
+            if (typeof issued.approvalReceipt === "string") {
+              toolArgs = { ...toolArgs, approvalReceipt: issued.approvalReceipt };
+            }
+          }
+          return await service.executeTool(tool.name, toolArgs);
         }
       })
     );
