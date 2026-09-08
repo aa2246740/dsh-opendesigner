@@ -43,25 +43,37 @@ There are two buttons. They are not aliases.
 
 应用到工程 refuses the whole batch when a main-tree file diverged from `baseRef` (`BATCH_CONFLICT`). User deletion vs Agent modify of a file that existed at `baseRef` is a conflict: the deletion stays, the candidate stays in the batch. Binary files compare raw bytes. Create batch fails with `DIRTY_WORKTREE` when the project has uncommitted files outside `.designer`.
 
+**MAIN-01.** Direct `apply()` and the default receipt path (`captureFrozen` → hash → consume → `commitPrepared`) share one writer protocol. `commitPrepared` re-runs the three-way conflict policy against the batch `baseRef` and current main before any write. A valid receipt is not a force-overwrite.
+
 **PR4-F01.** The approval `diffHash` is `hashFrozenChangeset`. It binds project, worktree, batch, `baseRef`, every op kind/path/mode, and before/after content hashes (plus the after-byte map). `toolDiffHash` for copy/edit/`accept_source_patch` also binds source/target, `replace_all`, and after bytes. After a receipt is issued, swapping worktree bytes at the same path changes the hash and consume is `DENIED`.
 
-**PR4-R2-01.** Consume of `batch_apply` captures one frozen changeset, hashes it, consumes the receipt against that hash, and stores an immutable clone (`approvedChangeset`). Commit writes that object. It does not look up “latest pinned” by `batchId`. `apply()` captures then commits in one step. Distinct proposals are distinct `hashFrozenChangeset` identities. `executeTool` / `issueHostReceipt` run on one command queue. Concurrent `captureFrozen(B)` while `commitPrepared(A)` is running still writes A. The old pin map is gone.
+**PR4-R2-01 / harsh B01.** Computing a `diffHash` pins an immutable `FrozenChangeset` keyed by that hash (not by “latest capture for this batchId”). `ApprovalLedger.consume` marks that hash as the approved snapshot. `AgentBatchRegistry.apply(batchId)` writes those pinned bytes. It does not recapture the mutable worktree after consume. If a `ledger.consume` persist hook swaps the worktree to `NOT_ACCEPTED_B` and issues an unconsumed B receipt, `apply(batchId)` still writes `APPROVED_A`. Distinct proposals are distinct hashes. `commitPrepared(frozen)` still writes the object it was given. `commitPrepared` still runs the MAIN-01 three-way against main; a receipt is not force-overwrite. Soft Service `approvedChangeset` remains a second path for `applyOpenBatchFiles`. Without an approved pin, `apply` still captures (operator / autoApprove).
 
 **PR4-F02.** Conflict preflight is not the last check. `commitPrepared` re-reads each destination and compares `expected-before`. A user edit after preflight is `BATCH_CONFLICT`. The user bytes stay.
 
 **PR4-R2-02.** The write itself is a managed single-writer boundary: exclusive sibling `.od-write-lock` (`wx`), re-read destination, fail closed on fingerprint mismatch, then write, then drop the lock. Atomic rename alone is not that protocol. A user edit injected after `recordBackup` and before the managed write is still `BATCH_CONFLICT`; the user bytes stay.
 
-A leftover `applying` journal is replayed on load only when every path is evidence-complete (current fingerprint equals `beforeHash` or `afterHash`). Then backups are restored.
+A leftover `applying` journal is replayed on load only when every path is evidence-complete (current fingerprint equals `beforeHash` or `afterHash`) **and** every recorded backup exists as a regular file whose bytes (and mode, when planned) match `beforeHash`. Then backups are restored and read-back must match `beforeHash` before the journal is cleared.
 
 **PR4-F03.** Corrupt journal JSON, bad schema, or workspace mismatch is `BATCH_RECOVERY_BLOCKED`. It is not a silent missing journal.
 
-**PR4-R2-03.** Recovery does not pretend success. Hashless old journals, a user repair matching neither hash, a planned write whose file the user deleted, a planned delete whose path the user recreated, and a truncated/half-write (`AGE` vs `AGENT_FULL`) all **BLOCK**. The file, journal, and backups stay. `recovered: true` is not returned and the log is not cleared. The weak hashless auto-restore path (old P02 / PR3-11) is gone. Hashed in-process rollback (C07: later-file failure after an earlier write) still restores from backups when every path matches `beforeHash` or `afterHash`.
+**PR4-R2-03 / PR6-R01 / PR6-R02.** Recovery does not pretend success. Recovery first builds a **per-file** plan. A path is known only when the current fingerprint equals `beforeHash` or `afterHash`. If **any** file is unknown — user repair, expanding/new-file partial, same-length garbage, unreadable target, file→directory — the **whole batch** is `BATCH_RECOVERY_BLOCKED`. Bytes, journal, and backups stay. There is no silent `preserved:true` that clears the journal. Length and a third hash never prove completeness or user intent. Mixed `USER_REPAIR_A` + `AGENT_B` must not restore every backup (that would overwrite the repair). Hashless old journals, a planned write whose file the user deleted, and a planned delete whose path the user recreated also **BLOCK**. Hashed in-process rollback (C07) still restores from backups when every path is known.
+
+P02 in `docs/review-2026-09-08-pr6/` expects this fail-closed third-state, not PR #6’s quiet preserve. Unknown third state must not auto-declare the transaction resolved.
+
+**MAIN-02.** Matching `afterHash` on the target is not enough. A corrupted, missing, or swapped backup is `BATCH_RECOVERY_BLOCKED`. The target is not overwritten and the journal stays.
 
 **PR4-F04.** Every journal `rel` and `backupRel` goes through `resolveProjectPath` before any write. `../` is `BATCH_RECOVERY_BLOCKED` and does not write outside the project.
 
 ## Accept / reject (source ChangeSet)
 
-Local ops (fill, radius, padding, text color, shadow, drag) write the live className and push a checkpoint. **Rewind** undoes them, including source overlays keyed by workspace and worktree. Restore targets the checkpoint’s worktree, not “whatever batch is open now.” Overlay capture stores binary mid-history (hash + bytes). The restore plan is materialized (jail + hashes) before any write and before the checkpoint cursor moves. `MAIN_SNAPSHOT` must not clobber `BATCH_WORK`. Rewind to a mid binary state `81 00` must not fall back to the initial `80 00`.
+Local ops (fill, radius, padding, text color, shadow, drag) write the live className and push a checkpoint. **Rewind** undoes them, including source overlays keyed by workspace and worktree. Restore targets the checkpoint’s worktree, not “whatever batch is open now.” Overlay capture stores binary mid-history (hash + bytes). The restore plan is materialized (jail + hashes) and **preflighted** by `validateRestorePlan` before any write and before the checkpoint cursor moves. That check is not a path-string no-op: it `lstat`s each target and refuses directories and symlinks (`EISDIR` / `PATH_JAIL`) so a later-file directory conflict cannot leave `a.txt` already rewritten. Apply then uses a restore journal with compensation, the same class of protection as batch Apply. A later-file `EISDIR` (or disk error) leaves earlier files unchanged, or an explicit blocked journal. `MAIN_SNAPSHOT` must not clobber `BATCH_WORK`. Rewind to a mid binary state `81 00` must not fall back to the initial `80 00`.
+
+**MAIN-03 / F05.** Multi-file Rewind is not a per-file loop that can stop halfway. `validateRestorePlan` rejects a directory at any target before the first restore write. Files, in-memory Store, and the history cursor stay aligned: restore runs to completion (or rolls back) before Store and cursor move.
+
+Checkpoints persist `workspaceId` / `worktreeKey` even when there are no overlay files, so identity survives reload without `sourceFiles`.
+
+**MAIN-06 (short-term).** While an agent batch is open, `accept_source_patch` that would write the main project root is `SOURCE_PATCH_MAIN_ROOT_LOCKED`. File I/O for other tools already uses the batch worktree; Accept must not mix those before-images. Binding each proposal to an explicit worktree is the full fix and is deferred.
 
 The model path is a structured source patch bound to a real file:
 
@@ -108,6 +120,10 @@ One server runtime owns `projectId` and `storeVersion`. Hydrate requires both `p
 
 **PR4-F07.** One writer per project. A second `OpenDesignerService.init()` on the same root is `RUNTIME_BUSY` while the first pid holds `.designer/runtime.lock`. `saveCanvas` freezes store JSON and version at enqueue. `writeCanvas` persists that snapshot. `ackRevision` equals the version on disk, not a later bump.
 
+**MAIN-04.** Lock inspect is a state machine: missing (exclusive create), creating (empty file), corrupt, undecidable, held (live pid), proven-dead (valid payload, pid not alive). Creating, corrupt, held, and undecidable all refuse. They do not delete the file. Reclaim of a proven-dead lock and `release()` both require the holder token and the same `lockId`. Crash leftover empty or corrupt lock: if no OpenDesigner process is running, delete `.designer/runtime.lock` by hand, then retry.
+
+**MAIN-05 (deferred).** The lock is not a shared session. Preview and the DSH plugin still need one authoritative Service plus a version event stream. This tree keeps the single-writer lock. Do not remove it so two hosts can “share” a project. Full unified browser↔DSH runtime is follow-up work.
+
 **PR4-F09.** Source before-images are keyed by workspace and worktree. Binary files and read errors are stored as `binary` / `unreadable`. They are not recorded as absent.
 
 **PR4-R2-04.** Checkpoints carry the same worktree identity. Capture no longer skips binary files. Restore writes into the snapshot’s worktree directory.
@@ -122,7 +138,9 @@ npm run test:review
 npm run test:review:pr3
 npm run test:review:pr4
 npm run test:review:pr4r2
-OPENDESIGNER_PROJECT_ROOT=/absolute/path/to/your/react-app npm run preview
+npm run test:review:main
+npm run test:review:pr6
+OPENDESIGNER_PROJECT_ROOT=/absolute/path/to/your-react-app npm run preview
 ```
 
 Default preview project is `examples/programmer-page`, a real React + Tailwind `App.tsx` with main, cards, and a Pay button. Do not point preview at `test-fixtures`. Open `http://127.0.0.1:4173/`. The preview server only serves `preview.html`, `preview/`, and `lib/`.
@@ -166,4 +184,19 @@ PR4 round-2 gates (B01–B10, including B08):
 REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-pr4-r2/qa/*.test.mjs
 ```
 
-See `docs/review-pr3/BACKLOG_PR3.json` for PR3-01…PR3-14 and the OD-xx mapping table. Do not treat a mapping row as closing an OD item. Do not claim PR3-01…14 all closed. Do not renumber OD-xx.
+MAIN 2026-09-08 gate (C01–C08, N01–N03, V01–V12, M01–M04). Target 27/27. See `docs/review-2026-09-08-main/GATE.md` for closed vs deferred MAIN-*:
+
+```sh
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-2026-09-08-main/qa/core-regression.test.mjs docs/review-2026-09-08-main/qa/main-boundaries.test.mjs
+```
+
+PR6 2026-09-08 gate (P01–P04, F01–F05): keep B01 pin; fail-closed recovery for PR6-R01/R02; `validateRestorePlan` refuses directory conflicts before rewind writes. See `docs/review-2026-09-08-pr6/GATE.md`. Combined Gate A:
+
+```sh
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test \
+  docs/review-2026-09-08-main/qa/core-regression.test.mjs \
+  docs/review-2026-09-08-main/qa/main-boundaries.test.mjs \
+  docs/review-2026-09-08-pr6/qa/pr6-boundaries.test.mjs
+```
+
+See `docs/review-pr3/BACKLOG_PR3.json` for PR3-01…PR3-14 and the OD-xx mapping table. Do not treat a mapping row as closing an OD item. Do not claim PR3-01…14 all closed. Do not renumber OD-xx. MAIN-xx refine leftovers; they do not replace OD/PR3/PR4/R2 numbers. This PR supersedes #6 — do not merge #6.

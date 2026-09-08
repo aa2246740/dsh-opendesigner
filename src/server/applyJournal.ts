@@ -139,6 +139,15 @@ export class ApplyJournal {
     };
   }
 
+  /**
+   * Crash recovery is all-or-nothing.
+   * 1. Validate every backup against beforeHash (MAIN-02) before any restore write.
+   * 2. Build a per-file plan: current fingerprint must equal beforeHash or afterHash.
+   * 3. If ANY file is unknown (third-party bytes, unreadable, type change, partial
+   *    write), BLOCK the whole batch. Keep all bytes, the journal, and backups.
+   * Length and a third hash never prove completeness or user intent (PR6-R02).
+   * Mixed known+unknown must not fall back to restoring every backup (PR6-R01).
+   */
   public async recover(): Promise<{ recovered: boolean; blocked?: boolean }> {
     const journal = await this.load();
     if (!journal) return { recovered: false };
@@ -188,12 +197,28 @@ export class ApplyJournal {
         if (!hashField(item.beforeHash) || !hashField(item.afterHash)) {
           await this.block(journal, `Recovery blocked: journal for ${item.rel} is missing before/after hashes.`);
         }
+      }
+
+      for (const item of classified) {
+        const planned = plannedByRel.get(item.rel);
+        await this.assertBackupIntact(journal, item, planned);
+      }
+
+      // Per-file restore plan. Any third-party / unreadable / type-change /
+      // neither-hash state blocks the whole batch. Do not restore some files
+      // and leave others. Length and a third hash never prove user intent.
+      const plan: Array<{ rel: string; known: boolean }> = [];
+      for (const item of classified) {
         const current = await readPresence(resolveProjectPath(this.projectRoot, item.rel));
         const now = fingerprintPresence(current);
-        if (now === item.afterHash || now === item.beforeHash) continue;
+        const known = now === item.afterHash || now === item.beforeHash;
+        plan.push({ rel: item.rel, known });
+      }
+      const unknown = plan.find((row) => !row.known);
+      if (unknown) {
         await this.block(
           journal,
-          `Recovery blocked: ${item.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
+          `Recovery blocked: ${unknown.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
         );
       }
 
@@ -207,6 +232,21 @@ export class ApplyJournal {
           await unlinkNoFollow(to);
         }
       }
+
+      for (const item of journal.backups) {
+        const planned = plannedByRel.get(item.rel);
+        const beforeHash = hashField(item.beforeHash) ? item.beforeHash : planned?.beforeHash;
+        const current = await readPresence(resolveProjectPath(this.projectRoot, item.rel));
+        const now = fingerprintPresence(current);
+        const expected = item.backupRel ? beforeHash : null;
+        if (now !== expected) {
+          await this.block(
+            journal,
+            `Recovery blocked: read-back of ${item.rel} does not match beforeHash after restore.`
+          );
+        }
+      }
+
       await this.clear();
       return { recovered: true };
     } catch (err) {
@@ -216,6 +256,55 @@ export class ApplyJournal {
       journal.updatedAt = new Date().toISOString();
       await atomicWriteJson(this.filePath, journal);
       throw new ApplyJournalBlockedError(journal.error);
+    }
+  }
+
+  private async assertBackupIntact(
+    journal: ApplyJournalEntry,
+    item: { rel: string; backupRel: string | null; beforeHash?: string | null },
+    planned: ApplyJournalOp | undefined
+  ): Promise<void> {
+    const beforeHash = hashField(item.beforeHash) ? item.beforeHash : planned?.beforeHash;
+    if (!item.backupRel) {
+      if (beforeHash === null) return;
+      return;
+    }
+    if (beforeHash === null) {
+      await this.block(
+        journal,
+        `Recovery blocked: backup for ${item.rel} exists but beforeHash is absent.`
+      );
+    }
+    if (!hashField(beforeHash)) {
+      await this.block(journal, `Recovery blocked: journal for ${item.rel} is missing beforeHash.`);
+    }
+    const backupAbs = resolveProjectPath(this.projectRoot, item.backupRel);
+    const presence = await readPresence(backupAbs);
+    if (presence.kind !== "bytes") {
+      await this.block(
+        journal,
+        `Recovery blocked: backup for ${item.rel} is missing or not a regular file.`
+      );
+    }
+    if (fingerprintPresence(presence) !== beforeHash) {
+      await this.block(
+        journal,
+        `Recovery blocked: backup for ${item.rel} does not match beforeHash. File, journal, and backups retained.`
+      );
+    }
+    if (typeof planned?.mode === "number") {
+      try {
+        const st = await fs.lstat(backupAbs);
+        if ((Number(st.mode) & 0o777) !== planned.mode) {
+          await this.block(journal, `Recovery blocked: backup mode mismatch for ${item.rel}.`);
+        }
+      } catch (err) {
+        if (err instanceof ApplyJournalBlockedError) throw err;
+        await this.block(
+          journal,
+          `Recovery blocked: backup for ${item.rel} is unreadable (${(err as NodeJS.ErrnoException).code || "error"}).`
+        );
+      }
     }
   }
 

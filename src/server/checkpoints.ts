@@ -24,6 +24,8 @@ export interface Checkpoint {
   kind: CheckpointKind;
   store: CheckpointSnapshot;
   sourceFiles?: SourceOverlay;
+  workspaceId?: string;
+  worktreeKey?: string;
 }
 
 export interface CheckpointSummary {
@@ -92,7 +94,15 @@ export class CheckpointLog {
       const entries = Array.isArray(data.entries) ? cloneSnapshot(data.entries) : [];
       this.entries = entries.map((entry) => {
         const overlay = migrateOverlay(entry.sourceFiles);
-        return overlay ? { ...entry, sourceFiles: overlay } : { ...entry, sourceFiles: undefined };
+        if (overlay) {
+          return {
+            ...entry,
+            sourceFiles: overlay,
+            workspaceId: entry.workspaceId ?? overlay.workspaceId,
+            worktreeKey: entry.worktreeKey ?? overlay.worktreeKey
+          };
+        }
+        return { ...entry, sourceFiles: undefined };
       });
       this.cursor = Number.isInteger(data.cursor) ? data.cursor : this.entries.length - 1;
       if (this.cursor >= this.entries.length) this.cursor = this.entries.length - 1;
@@ -114,6 +124,8 @@ export class CheckpointLog {
     kind: CheckpointKind;
     store: CheckpointSnapshot;
     sourceFiles?: SourceOverlay;
+    workspaceId?: string;
+    worktreeKey?: string;
   }): Promise<Checkpoint> {
     if (this.cursor >= 0 && this.cursor < this.entries.length - 1) {
       this.entries = this.entries.slice(0, this.cursor + 1);
@@ -125,7 +137,9 @@ export class CheckpointLog {
       label: input.label,
       kind: input.kind,
       store: cloneSnapshot(input.store),
-      sourceFiles: overlay ? cloneSnapshot(overlay) : undefined
+      sourceFiles: overlay ? cloneSnapshot(overlay) : undefined,
+      workspaceId: input.workspaceId ?? overlay?.workspaceId,
+      worktreeKey: input.worktreeKey ?? overlay?.worktreeKey
     };
     this.entries.push(checkpoint);
     if (this.entries.length > this.maxEntries) {

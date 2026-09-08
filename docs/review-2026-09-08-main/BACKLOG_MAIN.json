@@ -1,0 +1,81 @@
+{
+  "date": "2026-09-08",
+  "commit": "bf3abd72a09c09d6b3cab413984637a02bc8afbe",
+  "note": "新MAIN编号仅细化遗留问题，不替换既有OD/PR3/PR4/R2编号。M01-M04是测试编号。",
+  "findings": [
+    {
+      "id": "MAIN-01",
+      "severity": "P0",
+      "releaseGate": true,
+      "title": "凭证批准路径绕过三方冲突检查",
+      "related": ["OD-01", "PR3-02", "PR4-F02", "PR4-R2-01"],
+      "evidence": "实测M01：真实AgentBatchRegistry+ApprovalLedger组合；Service调用链源码确认；非HTTP/DSH E2E",
+      "location": ["src/server/index.ts:assertReceipt / applyOpenBatchFiles", "src/server/agentBatch.ts:285-354,355-494"],
+      "observed": "用户主目录USER_CONCURRENT，Agent候选AGENT；签发/消费合法凭证后commitPrepared返回成功，主文件变AGENT。",
+      "fix": "批准路径也应执行同一三方冲突策略；由验证后的不可变候选完成批准与提交。禁止普通批准隐式变成force。",
+      "acceptance": "直接apply和默认凭证路径同样拒绝用户修改/删除/二进制冲突；保留主目录及候选；批准A后换B仍拒绝或只提交A。"
+    },
+    {
+      "id": "MAIN-02",
+      "severity": "P1",
+      "releaseGate": true,
+      "title": "恢复校验目标文件却不校验备份内容",
+      "related": ["PR3-11", "PR4-F03", "PR4-R2-03"],
+      "evidence": "实测M02，原始完整恢复模块",
+      "location": ["src/server/applyJournal.ts:187-213"],
+      "observed": "目标匹配afterHash，但备份已改为CORRUPTED_BACKUP；recover覆盖目标并清除journal。",
+      "fix": "在任何恢复写入前校验完整计划及所有备份字节与beforeHash、类型/模式；缺失/损坏则阻断并保留现场；恢复后读回验证。",
+      "acceptance": "备份损坏/缺失/错文件时不写目标、不清日志；合法备份仍可恢复。"
+    },
+    {
+      "id": "MAIN-03",
+      "priority": "P0",
+      "releaseGate": true,
+      "title": "多文件Rewind失败可留下半恢复状态",
+      "related": ["OD-04", "PR3-10", "PR4-F09", "PR4-R2-04"],
+      "evidence": "实测M03：materializeRestorePlan+applyRestorePlan；Service先恢复后移动游标的调用链源码确认",
+      "location": ["src/server/sourceOverlay.ts:84-98", "src/server/index.ts:restoreSourceFiles / rewind"],
+      "observed": "恢复a.txt成功变OLD_A后，b.txt因是目录抛EISDIR；a.txt不回滚，恢复失败但已改变正式文件。",
+      "fix": "恢复不是逐文件循环写；预检目标、工作树和全部快照，使用带日志和补偿的事务/隔离恢复；失败不得留下未说明的混合状态。",
+      "acceptance": "第N个文件失败、目录冲突、磁盘异常时全量不变或进入可恢复的明确状态；文件、Store、历史游标一致。"
+    },
+    {
+      "id": "MAIN-04",
+      "priority": "P1",
+      "releaseGate": true,
+      "title": "运行时锁初始化窗口允许两个实例同时持锁",
+      "related": ["OD-07", "PR3-07", "PR4-F07", "PR4-R2-02"],
+      "evidence": "实测M04，原始RuntimeLock，两实例受控并发，暂停PID写入IO边界",
+      "location": ["src/server/runtimeLock.ts:34-53,60-79"],
+      "observed": "首实例创建空锁后暂停，第二实例解析失败将其视为陈旧并删除；两次acquire均成功。",
+      "fix": "区分缺失/创建中/损坏/可证实陈旧锁；创建中和无法判断时拒绝；回收与释放须校验唯一持有者令牌及同一锁身份。",
+      "acceptance": "同时启动只允许一个成功；第一实例不能移除第二实例锁；崩溃遗留有明确恢复策略。"
+    },
+    {
+      "id": "MAIN-05",
+      "priority": "P1",
+      "releaseGate": true,
+      "title": "阻止第二个Service不等于浏览器与DSH共享会话",
+      "related": ["OD-07", "PR3-07", "PR4-F07"],
+      "fix": "保留单写者；把预览或宿主改为薄客户端，经RPC/HTTP共享权威Service和版本事件流。THIS PR: keep lock only; defer full unified runtime.",
+      "acceptance": "预览与DSH同时打开同项目，人和Agent交替修改同一真实节点；两端同版本，断线恢复不覆盖。DEFER full acceptance; short-term = keep lock + document."
+    },
+    {
+      "id": "MAIN-06",
+      "priority": "P1",
+      "releaseGate": true,
+      "title": "源码提案写主目录，但打开批次时before-image/Checkpoint来自批次",
+      "related": ["OD-04", "PR3-10", "PR4-F09", "PR4-R2-04"],
+      "fix": "一次提案显式绑定目标workspace/worktree；短期在open batch时禁用主目录源码提案。",
+      "acceptance": "open batch情况下accept/reopen/rewind恢复同一目标；THIS PR short-term: refuse acceptSourcePatch on main root while batch open."
+    },
+    {
+      "id": "MAIN-07",
+      "priority": "P1",
+      "releaseGate": false,
+      "title": "静态JSX投影不等于真实React页面预览",
+      "fix": "OUT OF SCOPE this PR.",
+      "acceptance": "deferred"
+    }
+  ]
+}

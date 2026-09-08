@@ -23,6 +23,8 @@ import {
   materializeOverlayEntry,
   migrateOverlay,
   overlayRoot,
+  recoverRestoreJournal,
+  validateRestorePlan,
   type RestorePlanStep
 } from "./sourceOverlay.ts";
 import { git } from "./gitExec.ts";
@@ -185,6 +187,7 @@ export class OpenDesignerService {
       await this.loadCanvas();
       await this.checkpoints.load();
       await this.batches.load();
+      await recoverRestoreJournal(this.projectRoot, this.projectId);
       await this.approvals.load();
       await this.sourceBaselines.load();
       for (const rel of Object.keys(this.sourceBaselines.overlay(this.worktreeKey()))) {
@@ -364,6 +367,7 @@ export class OpenDesignerService {
       if (!bytes) continue;
       plan.push({ rel, abs: resolveProjectPath(root, rel), bytes });
     }
+    validateRestorePlan(plan);
     await applyRestorePlan(plan);
   }
 
@@ -395,7 +399,9 @@ export class OpenDesignerService {
       label: input.label,
       kind: input.kind ?? (hasFiles ? "session" : "canvas"),
       store: this.store.toJSON(),
-      sourceFiles
+      sourceFiles,
+      workspaceId: sourceFiles.workspaceId,
+      worktreeKey: sourceFiles.worktreeKey
     });
     return {
       success: true,
@@ -612,6 +618,14 @@ export class OpenDesignerService {
         if (code === "ENOENT") {
           return { success: false, error: err instanceof Error ? err.message : String(err), code: "NOT_FOUND" };
         }
+        if (
+          code === "EISDIR" ||
+          code === "RESTORE_VERIFY" ||
+          code === "RESTORE_PLAN_ROOT" ||
+          code === "RESTORE_PLAN_ROOT_MISMATCH"
+        ) {
+          return { success: false, error: err instanceof Error ? err.message : String(err), code };
+        }
       }
       throw err;
     }
@@ -738,6 +752,12 @@ export class OpenDesignerService {
 
   public async acceptSourcePatch(input: { proposalId?: string } = {}): Promise<unknown> {
     await this.init();
+    if (this.batches.openBatch()) {
+      throw new SourcePatchError(
+        "An open agent batch is using a worktree. Accepting a source patch into the main project root is refused so before-images and checkpoints stay bound to one workspace. Discard or apply the batch first.",
+        "SOURCE_PATCH_MAIN_ROOT_LOCKED"
+      );
+    }
     const proposal = this.pendingProposal;
     if (!proposal) {
       throw new SourcePatchError("No pending source patch.", "NO_PROPOSAL");

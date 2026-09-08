@@ -1,8 +1,12 @@
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { resolveProjectPath } from "./pathJail.ts";
 import { bytesFromBaseline, readBaselinePresence, type BaselinePresence } from "./sourceBaseline.ts";
-import { contentHash, writeFileNoFollow } from "./fileBytes.ts";
+import { contentHash, managedReplace, managedUnlink, readPresence } from "./fileBytes.ts";
+import { ApplyJournal, type ApplyJournalOp } from "./applyJournal.ts";
+import { fingerprintPresence } from "./frozenChangeset.ts";
 
 export type OverlayFile = BaselinePresence;
 
@@ -85,14 +89,170 @@ export function materializeRestorePlan(srcDir: string, overlay: SourceOverlay): 
   return Object.entries(overlay.files).map(([rel, entry]) => materializeOverlayEntry(srcDir, rel, entry));
 }
 
-export async function applyRestorePlan(plan: RestorePlanStep[]): Promise<void> {
+function restorePlanError(code: string, message: string): Error {
+  const error = new Error(message);
+  (error as Error & { code: string }).code = code;
+  return error;
+}
+
+export function validateRestorePlan(plan: RestorePlanStep[]): void {
   for (const step of plan) {
-    if (step.bytes === null) {
-      await fs.rm(step.abs, { force: true });
-      continue;
+    if (typeof step.rel !== "string" || step.rel.length === 0) {
+      throw restorePlanError("RESTORE_PLAN_INVALID", "Restore plan step is missing rel.");
     }
-    await fs.mkdir(path.dirname(step.abs), { recursive: true });
-    await writeFileNoFollow(step.abs, step.bytes);
+    if (typeof step.abs !== "string" || step.abs.length === 0) {
+      throw restorePlanError("RESTORE_PLAN_INVALID", `Restore plan step for ${step.rel} is missing abs.`);
+    }
+    let st: fsSync.Stats;
+    try {
+      st = fsSync.lstatSync(step.abs);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      throw restorePlanError("PATH_JAIL", `PATH_JAIL: symlink at restore target ${step.abs}`);
+    }
+    if (st.isDirectory()) {
+      throw restorePlanError("EISDIR", `EISDIR: ${step.abs}`);
+    }
+  }
+}
+
+export function restoreJournalPath(srcDir: string): string {
+  return path.join(srcDir, ".designer", "restore-journal.json");
+}
+
+export function workspaceIdOf(root: string): string {
+  return createHash("sha256").update(path.resolve(root)).digest("hex").slice(0, 12);
+}
+
+export function inferRestoreSourceDir(plan: RestorePlanStep[]): string {
+  if (plan.length === 0) return "";
+  const dirs = plan.map((step) => {
+    const rel = step.rel.replace(/\\/g, "/");
+    const abs = step.abs.replace(/\\/g, "/");
+    if (!abs.endsWith(rel)) {
+      const error = new Error(`RESTORE_PLAN_ROOT:${step.rel}`);
+      (error as Error & { code: string }).code = "RESTORE_PLAN_ROOT";
+      throw error;
+    }
+    const prefix = abs.slice(0, abs.length - rel.length).replace(/\/+$/, "");
+    return prefix.length > 0 ? prefix : "/";
+  });
+  const first = dirs[0]!;
+  if (dirs.some((dir) => dir !== first)) {
+    const error = new Error("RESTORE_PLAN_ROOT_MISMATCH");
+    (error as Error & { code: string }).code = "RESTORE_PLAN_ROOT_MISMATCH";
+    throw error;
+  }
+  return first;
+}
+
+export async function recoverRestoreJournal(srcDir: string, workspaceId?: string): Promise<void> {
+  const journal = new ApplyJournal(
+    srcDir,
+    workspaceId ?? workspaceIdOf(srcDir),
+    restoreJournalPath(srcDir)
+  );
+  await journal.recover();
+}
+
+export async function applyRestorePlan(plan: RestorePlanStep[]): Promise<void> {
+  if (plan.length === 0) return;
+  validateRestorePlan(plan);
+  await preflightRestorePlan(plan);
+  const srcDir = inferRestoreSourceDir(plan);
+  const workspaceId = workspaceIdOf(srcDir);
+  const journal = new ApplyJournal(srcDir, workspaceId, restoreJournalPath(srcDir));
+  await journal.recover();
+
+  const planned: ApplyJournalOp[] = [];
+  for (const step of plan) {
+    const current = await readPresence(step.abs);
+    if (current.kind === "unreadable") {
+      const error = new Error(current.message);
+      (error as Error & { code: string }).code = current.code;
+      throw error;
+    }
+    planned.push({
+      kind: step.bytes === null ? "delete" : "write",
+      rel: step.rel,
+      beforeHash: fingerprintPresence(current),
+      afterHash: step.bytes === null ? null : contentHash(step.bytes)
+    });
+  }
+
+  const batchId = `restore-${randomUUID()}`;
+  const staging = journal.stagingDir(batchId);
+  await fs.mkdir(staging, { recursive: true });
+  const entry = await journal.begin(batchId, planned);
+
+  try {
+    for (let i = 0; i < plan.length; i++) {
+      const step = plan[i]!;
+      const op = planned[i]!;
+      const current = await readPresence(step.abs);
+      let backupRel: string | null = null;
+      if (current.kind === "bytes") {
+        backupRel = await journal.backupFile(staging, step.rel, step.abs);
+      } else if (current.kind === "unreadable") {
+        const error = new Error(current.message);
+        (error as Error & { code: string }).code = current.code;
+        throw error;
+      }
+      await journal.recordBackup(entry, step.rel, backupRel, {
+        beforeHash: op.beforeHash,
+        afterHash: op.afterHash
+      });
+      if (step.bytes === null) {
+        await managedUnlink(step.abs, op.beforeHash ?? null);
+      } else {
+        await managedReplace(step.abs, op.beforeHash ?? null, step.bytes);
+      }
+    }
+
+    for (const step of plan) {
+      const current = await readPresence(step.abs);
+      const expected = step.bytes === null ? null : contentHash(step.bytes);
+      if (fingerprintPresence(current) !== expected) {
+        const error = new Error(`RESTORE_VERIFY:${step.rel}`);
+        (error as Error & { code: string }).code = "RESTORE_VERIFY";
+        throw error;
+      }
+    }
+
+    await journal.commit(entry);
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  } catch (err) {
+    try {
+      await journal.recover();
+    } catch (recErr) {
+      throw recErr;
+    }
+    throw err;
+  }
+}
+
+async function preflightRestorePlan(plan: RestorePlanStep[]): Promise<void> {
+  for (const step of plan) {
+    let st;
+    try {
+      st = await fs.lstat(step.abs);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      const error = new Error(`PATH_JAIL: symlink at restore target ${step.abs}`);
+      (error as Error & { code: string }).code = "PATH_JAIL";
+      throw error;
+    }
+    if (st.isDirectory()) {
+      const error = new Error(`EISDIR: ${step.abs}`);
+      (error as Error & { code: string }).code = "EISDIR";
+      throw error;
+    }
   }
 }
 
