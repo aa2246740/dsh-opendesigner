@@ -6,9 +6,9 @@ Vendor gates for harsh B01 (keep) plus PR6-R01 / PR6-R02 (fix on PR #5, not by m
 
 - `BACKLOG_PR6.json` — PR6-R01, PR6-R02
 - `GATE.md` — B01 kept; R01/R02 closed; #6 must not merge
-- `qa/pr6-boundaries.test.mjs` — P01–P04, F01–F04
+- `qa/pr6-boundaries.test.mjs` — P01–P04, F01–F05
 
-Do not weaken F01–F04 or P01. P02 expects fail-closed BLOCKED for third-state USER_REPAIR (not silent preserve).
+Do not weaken F01–F05 or P01/P03/P04. P02 expects fail-closed BLOCKED for third-state USER_REPAIR (not silent preserve).
 
 ## Gate
 
