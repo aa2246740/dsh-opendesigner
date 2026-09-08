@@ -3154,7 +3154,7 @@ Accept writes this file. Reject leaves the repo unchanged.`;
       const accepted = proposal;
       const result = await callTool("accept_source_patch", { proposalId: accepted.id });
       if (result.success === false) {
-        aiEl.textContent = `Accept refused: ${String(result.error || "stale or unsupported")}`;
+        aiEl.textContent = `Accept refused: ${String(result.error || "stale or unsupported")}${result.code ? ` (${String(result.code)})` : ""}`;
         return;
       }
       if (result.store && typeof result.store === "object") {
