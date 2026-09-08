@@ -26,6 +26,15 @@ Write-path safety for every entry: `apply()`, receipt/credential `commitPrepared
 REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test docs/review-2026-09-08-main/qa/core-regression.test.mjs docs/review-2026-09-08-main/qa/main-boundaries.test.mjs
 ```
 
-Target: 27/27. Also `npm test` and existing `test:review*`.
+Combined with the PR6 pack (B01 + PR6-R01/R02) on this same PR:
+
+```sh
+REVIEW_SOURCE_ROOT=$PWD/src node --experimental-strip-types --test \
+  docs/review-2026-09-08-main/qa/core-regression.test.mjs \
+  docs/review-2026-09-08-main/qa/main-boundaries.test.mjs \
+  docs/review-2026-09-08-pr6/qa/pr6-boundaries.test.mjs
+```
+
+Target: 27/27 MAIN. Also `npm test` and existing `test:review*`. PR #6 must not merge; this PR is the single Gate A PR.
 
 Crash leftover lock: if `.designer/runtime.lock` is empty or corrupt and no OpenDesigner process is running, delete that file and retry. Do not delete it while a writer is still creating the payload.

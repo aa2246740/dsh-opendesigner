@@ -139,6 +139,15 @@ export class ApplyJournal {
     };
   }
 
+  /**
+   * Crash recovery is all-or-nothing.
+   * 1. Validate every backup against beforeHash (MAIN-02) before any restore write.
+   * 2. Build a per-file plan: current fingerprint must equal beforeHash or afterHash.
+   * 3. If ANY file is unknown (third-party bytes, unreadable, type change, partial
+   *    write), BLOCK the whole batch. Keep all bytes, the journal, and backups.
+   * Length and a third hash never prove completeness or user intent (PR6-R02).
+   * Mixed known+unknown must not fall back to restoring every backup (PR6-R01).
+   */
   public async recover(): Promise<{ recovered: boolean; blocked?: boolean }> {
     const journal = await this.load();
     if (!journal) return { recovered: false };
@@ -195,13 +204,21 @@ export class ApplyJournal {
         await this.assertBackupIntact(journal, item, planned);
       }
 
+      // Per-file restore plan. Any third-party / unreadable / type-change /
+      // neither-hash state blocks the whole batch. Do not restore some files
+      // and leave others. Length and a third hash never prove user intent.
+      const plan: Array<{ rel: string; known: boolean }> = [];
       for (const item of classified) {
         const current = await readPresence(resolveProjectPath(this.projectRoot, item.rel));
         const now = fingerprintPresence(current);
-        if (now === item.afterHash || now === item.beforeHash) continue;
+        const known = now === item.afterHash || now === item.beforeHash;
+        plan.push({ rel: item.rel, known });
+      }
+      const unknown = plan.find((row) => !row.known);
+      if (unknown) {
         await this.block(
           journal,
-          `Recovery blocked: ${item.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
+          `Recovery blocked: ${unknown.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`
         );
       }
 

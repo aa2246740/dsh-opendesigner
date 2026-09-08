@@ -18,6 +18,8 @@ import {
   fileModeOf,
   fingerprintPresence,
   hashFrozenChangeset,
+  approvedFrozenFor,
+  clearApprovedFrozen,
   type FrozenChangeset,
   type FrozenOp
 } from "./frozenChangeset.ts";
@@ -318,7 +320,9 @@ export class AgentBatchRegistry {
       ops,
       afterBytes
     };
-    return cloneFrozenChangeset(frozen);
+    const cloned = cloneFrozenChangeset(frozen);
+    hashFrozenChangeset(cloned);
+    return cloned;
   }
 
   public async prepareApply(batchId: string): Promise<FrozenChangeset> {
@@ -336,8 +340,12 @@ export class AgentBatchRegistry {
   public async apply(batchId: string): Promise<BatchApplyResult> {
     return this.enqueueWrite(async () => {
       await this.journal.recover();
-      const frozen = await this.captureFrozen(batchId);
-      return await this.commitPreparedInner(frozen);
+      this.requireOpen(batchId);
+      const approved = approvedFrozenFor(batchId);
+      const frozen = approved ?? (await this.captureFrozen(batchId));
+      const result = await this.commitPreparedInner(frozen);
+      clearApprovedFrozen(batchId);
+      return result;
     });
   }
 

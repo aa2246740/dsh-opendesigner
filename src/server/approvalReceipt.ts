@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { atomicWriteJson } from "./atomicWrite.ts";
 import { ApprovalRequiredError } from "./approval.ts";
+import { markFrozenApproved } from "./frozenChangeset.ts";
 
 export const APPROVAL_TTL_MS = 5 * 60 * 1000;
 
@@ -39,6 +40,8 @@ export function hashDiffPayload(parts: Array<string | Buffer>): string {
 export class ApprovalLedger {
   private receipts: ApprovalReceipt[] = [];
   private readonly filePath: string;
+  public beforePersist?: () => void | Promise<void>;
+  private persisting = false;
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -54,6 +57,14 @@ export class ApprovalLedger {
   }
 
   public async persist(): Promise<void> {
+    if (this.beforePersist && !this.persisting) {
+      this.persisting = true;
+      try {
+        await this.beforePersist();
+      } finally {
+        this.persisting = false;
+      }
+    }
     await atomicWriteJson(this.filePath, { receipts: this.receipts } satisfies ReceiptFile);
   }
 
@@ -115,6 +126,7 @@ export class ApprovalLedger {
     }
     receipt.consumedAt = now;
     await this.persist();
+    markFrozenApproved(input.diffHash);
     return receipt;
   }
 }
