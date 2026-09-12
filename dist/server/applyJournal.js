@@ -1,0 +1,250 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { atomicWriteJson } from "./atomicWrite.js";
+import { PathJailError, resolveProjectPath } from "./pathJail.js";
+import { copyFileNoFollow, unlinkNoFollow, writeFileNoFollow, readPresence } from "./fileBytes.js";
+import { fingerprintPresence } from "./frozenChangeset.js";
+const PHASES = new Set(["prepared", "applying", "committed", "blocked"]);
+export class ApplyJournalBlockedError extends Error {
+    code = "BATCH_RECOVERY_BLOCKED";
+    constructor(message) {
+        super(message);
+        this.name = "ApplyJournalBlockedError";
+    }
+}
+function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+export class ApplyJournal {
+    projectRoot;
+    workspaceId;
+    filePath;
+    constructor(projectRoot, workspaceId, filePath) {
+        this.projectRoot = projectRoot;
+        this.workspaceId = workspaceId;
+        this.filePath = filePath;
+    }
+    async load() {
+        let rawText;
+        try {
+            rawText = await fs.readFile(this.filePath, "utf-8");
+        }
+        catch (err) {
+            if (err.code === "ENOENT")
+                return null;
+            throw new ApplyJournalBlockedError(`Apply journal unreadable (${err.code || "error"}). Recovery blocked.`);
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(rawText);
+        }
+        catch {
+            throw new ApplyJournalBlockedError("Apply journal JSON is corrupt. Recovery blocked.");
+        }
+        return this.parseEntry(parsed);
+    }
+    parseEntry(raw) {
+        if (!isRecord(raw)) {
+            throw new ApplyJournalBlockedError("Apply journal schema is invalid. Recovery blocked.");
+        }
+        if (raw.workspaceId !== this.workspaceId) {
+            throw new ApplyJournalBlockedError("Apply journal workspace identity mismatch. Recovery blocked.");
+        }
+        if (typeof raw.batchId !== "string" || raw.batchId.length === 0) {
+            throw new ApplyJournalBlockedError("Apply journal batchId is invalid. Recovery blocked.");
+        }
+        if (typeof raw.phase !== "string" || !PHASES.has(raw.phase)) {
+            throw new ApplyJournalBlockedError("Apply journal phase is invalid. Recovery blocked.");
+        }
+        if (!Array.isArray(raw.planned) || !Array.isArray(raw.backups)) {
+            throw new ApplyJournalBlockedError("Apply journal planned/backups must be arrays. Recovery blocked.");
+        }
+        const planned = [];
+        for (const item of raw.planned) {
+            if (!isRecord(item) || (item.kind !== "write" && item.kind !== "delete") || typeof item.rel !== "string") {
+                throw new ApplyJournalBlockedError("Apply journal planned op is invalid. Recovery blocked.");
+            }
+            this.assertJailedRel(item.rel);
+            planned.push({
+                kind: item.kind,
+                rel: item.rel,
+                mode: typeof item.mode === "number" ? item.mode : item.mode === null ? null : undefined,
+                beforeHash: typeof item.beforeHash === "string" || item.beforeHash === null ? item.beforeHash : undefined,
+                afterHash: typeof item.afterHash === "string" || item.afterHash === null ? item.afterHash : undefined
+            });
+        }
+        const backups = [];
+        for (const item of raw.backups) {
+            if (!isRecord(item) || typeof item.rel !== "string") {
+                throw new ApplyJournalBlockedError("Apply journal backup is invalid. Recovery blocked.");
+            }
+            this.assertJailedRel(item.rel);
+            if (item.backupRel !== null && item.backupRel !== undefined) {
+                if (typeof item.backupRel !== "string") {
+                    throw new ApplyJournalBlockedError("Apply journal backupRel is invalid. Recovery blocked.");
+                }
+                this.assertJailedRel(item.backupRel);
+            }
+            backups.push({
+                rel: item.rel,
+                backupRel: typeof item.backupRel === "string" ? item.backupRel : null,
+                beforeHash: typeof item.beforeHash === "string" || item.beforeHash === null ? item.beforeHash : undefined,
+                afterHash: typeof item.afterHash === "string" || item.afterHash === null ? item.afterHash : undefined
+            });
+        }
+        return {
+            workspaceId: this.workspaceId,
+            batchId: raw.batchId,
+            phase: raw.phase,
+            planned,
+            backups,
+            error: typeof raw.error === "string" ? raw.error : undefined,
+            updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString()
+        };
+    }
+    async recover() {
+        const journal = await this.load();
+        if (!journal)
+            return { recovered: false };
+        if (journal.phase === "committed") {
+            await this.clear();
+            return { recovered: false };
+        }
+        if (journal.phase === "blocked") {
+            throw new ApplyJournalBlockedError(journal.error || "Apply recovery is blocked. Inspect .designer/apply-journal.json.");
+        }
+        if (journal.backups.length === 0) {
+            await this.clear();
+            return { recovered: false };
+        }
+        try {
+            const plannedByRel = new Map(journal.planned.map((op) => [op.rel, op]));
+            const classified = [];
+            const seen = new Set();
+            for (const item of journal.backups) {
+                const planned = plannedByRel.get(item.rel);
+                classified.push({
+                    rel: item.rel,
+                    beforeHash: hashField(item.beforeHash) ? item.beforeHash : planned?.beforeHash,
+                    afterHash: hashField(item.afterHash) ? item.afterHash : planned?.afterHash,
+                    backupRel: item.backupRel
+                });
+                seen.add(item.rel);
+            }
+            for (const op of journal.planned) {
+                if (seen.has(op.rel))
+                    continue;
+                classified.push({
+                    rel: op.rel,
+                    beforeHash: op.beforeHash,
+                    afterHash: op.afterHash,
+                    backupRel: null
+                });
+            }
+            for (const item of classified) {
+                if (!hashField(item.beforeHash) || !hashField(item.afterHash)) {
+                    await this.block(journal, `Recovery blocked: journal for ${item.rel} is missing before/after hashes.`);
+                }
+                const current = await readPresence(resolveProjectPath(this.projectRoot, item.rel));
+                const now = fingerprintPresence(current);
+                if (now === item.afterHash || now === item.beforeHash)
+                    continue;
+                await this.block(journal, `Recovery blocked: ${item.rel} matches neither beforeHash nor afterHash. File, journal, and backups retained.`);
+            }
+            for (const item of [...journal.backups].reverse()) {
+                const to = resolveProjectPath(this.projectRoot, item.rel);
+                if (item.backupRel) {
+                    const backupAbs = resolveProjectPath(this.projectRoot, item.backupRel);
+                    await fs.mkdir(path.dirname(to), { recursive: true });
+                    await copyFileNoFollow(backupAbs, to);
+                }
+                else {
+                    await unlinkNoFollow(to);
+                }
+            }
+            await this.clear();
+            return { recovered: true };
+        }
+        catch (err) {
+            if (err instanceof ApplyJournalBlockedError)
+                throw err;
+            journal.phase = "blocked";
+            journal.error = err instanceof Error ? err.message : String(err);
+            journal.updatedAt = new Date().toISOString();
+            await atomicWriteJson(this.filePath, journal);
+            throw new ApplyJournalBlockedError(journal.error);
+        }
+    }
+    async block(journal, message) {
+        journal.phase = "blocked";
+        journal.error = message;
+        journal.updatedAt = new Date().toISOString();
+        await atomicWriteJson(this.filePath, journal);
+        throw new ApplyJournalBlockedError(message);
+    }
+    async begin(batchId, planned) {
+        for (const op of planned)
+            this.assertJailedRel(op.rel);
+        const entry = {
+            workspaceId: this.workspaceId,
+            batchId,
+            phase: "prepared",
+            planned,
+            backups: [],
+            updatedAt: new Date().toISOString()
+        };
+        await atomicWriteJson(this.filePath, entry);
+        return entry;
+    }
+    async recordBackup(entry, rel, backupRel, hashes) {
+        this.assertJailedRel(rel);
+        if (backupRel)
+            this.assertJailedRel(backupRel);
+        entry.phase = "applying";
+        entry.backups.push({
+            rel,
+            backupRel,
+            beforeHash: hashes?.beforeHash,
+            afterHash: hashes?.afterHash
+        });
+        entry.updatedAt = new Date().toISOString();
+        await atomicWriteJson(this.filePath, entry);
+    }
+    async commit(entry) {
+        entry.phase = "committed";
+        entry.updatedAt = new Date().toISOString();
+        await atomicWriteJson(this.filePath, entry);
+        await this.clear();
+    }
+    async clear() {
+        await fs.rm(this.filePath, { force: true });
+    }
+    stagingDir(batchId) {
+        return path.join(this.projectRoot, ".designer", "apply-staging", batchId);
+    }
+    async backupFile(staging, rel, from) {
+        this.assertJailedRel(rel);
+        const backupRel = path.join(".designer", "apply-staging", path.basename(staging), rel);
+        this.assertJailedRel(backupRel);
+        const backupAbs = resolveProjectPath(this.projectRoot, backupRel);
+        await fs.mkdir(path.dirname(backupAbs), { recursive: true });
+        await copyFileNoFollow(from, backupAbs);
+        return backupRel.replace(/\\/g, "/");
+    }
+    assertJailedRel(rel) {
+        try {
+            resolveProjectPath(this.projectRoot, rel);
+        }
+        catch (err) {
+            if (err instanceof PathJailError) {
+                throw new ApplyJournalBlockedError(`Apply journal path escapes the project (${rel}). Recovery blocked.`);
+            }
+            throw err;
+        }
+    }
+}
+function hashField(value) {
+    return typeof value === "string" || value === null;
+}
+export { writeFileNoFollow };
+//# sourceMappingURL=applyJournal.js.map
