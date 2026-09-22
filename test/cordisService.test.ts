@@ -30,7 +30,8 @@ describe("Server - DSH plugin form", () => {
     const pkg = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8"));
     assert.equal(REQUIRED_DSH_RELEASE, "0.1.2-rc.1");
     assert.equal(pkg.peerDependencies["@deepseek-ai/dsh-tools"], REQUIRED_DSH_RELEASE);
-    assert.equal(pkg.optionalDependencies["@deepseek-ai/dsh-tools"], REQUIRED_DSH_RELEASE);
+    assert.equal(pkg.optionalDependencies?.["@deepseek-ai/dsh-tools"], undefined);
+    assert.equal(pkg.dependencies?.["@deepseek-ai/dsh-tools"], undefined);
     assert.equal(pkg.peerDependencies["@deepseek-ai/cordis"], "^4.0.2");
     assert.equal(pkg.dsh?.bundle?.patch, "./cordis.patch.yml");
     assert.equal(pkg.dsh?.client, undefined);
