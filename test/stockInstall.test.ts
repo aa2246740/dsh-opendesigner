@@ -42,7 +42,7 @@ describe("stock DSH github: install contract", () => {
     );
     assert.match(lead, /pnpm/);
     assert.match(lead, /0\.1\.5-rc\.3/);
-    assert.match(lead, /@deepseek-ai\/dsh-tools` `0\.1\.2-rc\.1/);
+    assert.match(lead, /@deepseek-ai\/dsh-tools` `\^0\.1\.5-rc\.2/);
     assert.match(lead, /重启这个 Host/);
     assert.match(lead, /刷新页面/);
     assert.doesNotMatch(readme, /dshx|DSHX_HARNESS|my-plugins/i);
