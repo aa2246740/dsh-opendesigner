@@ -6,7 +6,7 @@
   "main": "./dist/plugin.js",
   "types": "./dist/plugin.d.ts",
   "exports": {
-    ".": : {
+    "\u002e": {
       "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js",
       "default": "./dist/plugin.js"
@@ -68,7 +68,7 @@
       "displayName": "OpenDesigner",
       "summary": {
         "en": "Jailed local-first visual designer plugin for DeepSeek Harness.",
-        "zh-CN": "DeepSeek Harness 本地优先视觉设计器插件，文件工具限制在工程根目录内。"
+        "zh-CN": "DeepSeek Harness \u672c\u5730\u4f18\u5148\u89c6\u89c9\u8bbe\u8ba1\u5668\u63d2\u4ef6\uff0c\u6587\u4ef6\u5de5\u5177\u9650\u5236\u5728\u5de5\u7a0b\u6839\u76ee\u5f55\u5185\u3002"
       }
     }
   },
