@@ -32,8 +32,8 @@ export interface DshHostContext {
     get?: (name: string) => unknown;
     on?: (event: string, handler: (...args: unknown[]) => unknown) => unknown;
 }
-/** Host CLI and `@deepseek-ai/dsh-tools` release this plugin is proved against. */
-export declare const REQUIRED_DSH_RELEASE = "0.1.2-rc.1";
+/** Host CLI release this plugin is proved against. Peer `@deepseek-ai/dsh-tools` is `^0.1.5-rc.2`. */
+export declare const REQUIRED_DSH_RELEASE = "0.1.5-rc.3";
 export declare const JSON_OUTPUT: {
     schema: {
         type: "object";
