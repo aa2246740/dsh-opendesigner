@@ -41,6 +41,8 @@ describe("stock DSH github: install contract", () => {
       /^# dsh-opendesigner\n\n```sh\ndsh plugin --profile web add github:aa2246740\/dsh-opendesigner\n```/
     );
     assert.match(lead, /pnpm/);
+    assert.match(lead, /0\.1\.5-rc\.3/);
+    assert.match(lead, /@deepseek-ai\/dsh-tools` `\^0\.1\.5-rc\.2/);
     assert.match(lead, /重启这个 Host/);
     assert.match(lead, /刷新页面/);
     assert.doesNotMatch(readme, /dshx|DSHX_HARNESS|my-plugins/i);

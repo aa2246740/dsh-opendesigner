@@ -8,7 +8,7 @@ PATH 上要有官方 `dsh`（没有就用 `npx @deepseek-ai/dsh`）和 **pnpm**�
 
 然后重启这个 Host，再刷新页面。`dsh plugin add` 只写 profile，不会热挂正在跑的进程。
 
-本机可视化编辑 React + Tailwind 组件。面向 DeepSeek Harness **0.1.5-rc.2**。peer：`@deepseek-ai/dsh-tools` `0.1.2-rc.1`，`@deepseek-ai/cordis` `^4.0.2`。Node 22.14 或更新。
+本机可视化编辑 React + Tailwind 组件。面向官方 DeepSeek Harness **0.1.5-rc.3**（`dsh-v0.1.5-rc.3`，`@deepseek-ai/dsh@0.1.5-rc.3`）。peer `@deepseek-ai/dsh-tools` `^0.1.5-rc.2`，由 Host 提供，不装进 profile。`@deepseek-ai/cordis` `^4.0.2`。Node 22.14 或更新。
 
 文件工具限制在项目根里。破坏性写入需要受信任的 host/UI 审批通道。模型给的 `approve: true` 不算。`autoApprove` 不会放宽路径 jail。画布在 `npm run preview`，没有 `dsh.client` web-shell。
 
