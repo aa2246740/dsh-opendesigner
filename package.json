@@ -6,7 +6,7 @@
   "main": "./dist/plugin.js",
   "types": "./dist/plugin.d.ts",
   "exports": {
-    ".": : {
+    ".": {
       "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js",
       "default": "./dist/plugin.js"
