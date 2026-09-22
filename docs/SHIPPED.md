@@ -1,17 +1,17 @@
 # What ships
 
-This is the product spec for the tree as loaded by DeepSeek Harness **0.1.2-rc.1**. Historical notes in `docs/01`–`docs/07` are not this spec. Original OD-01…OD-18 IDs stay frozen in `docs/review-2026-09-07/`. PR3-01…PR3-14 IDs stay stable in `docs/review-pr3/BACKLOG_PR3.json`. They are not all closed. Mapping there is related-not-closed. Residual holes from that round are **PR4-F01…PR4-F10** in `docs/review-pr4/BACKLOG_PR4.json`. Round-2 refinements are **PR4-R2-01…PR4-R2-05** in `docs/review-pr4-r2/BACKLOG_PR4_R2.json`.
+This is the product spec for the tree as loaded by DeepSeek Harness **0.1.5-rc.3**. Historical notes in `docs/01`–`docs/07` are not this spec. Original OD-01…OD-18 IDs stay frozen in `docs/review-2026-09-07/`. PR3-01…PR3-14 IDs stay stable in `docs/review-pr3/BACKLOG_PR3.json`. They are not all closed. Mapping there is related-not-closed. Residual holes from that round are **PR4-F01…PR4-F10** in `docs/review-pr4/BACKLOG_PR4.json`. Round-2 refinements are **PR4-R2-01…PR4-R2-05** in `docs/review-pr4-r2/BACKLOG_PR4_R2.json`.
 
 ## Required host
 
 | Piece | Pin |
 |---|---|
-| CLI | `@deepseek-ai/dsh@0.1.2-rc.1` (`npx @deepseek-ai/dsh@0.1.2-rc.1 --version`) |
-| Tool registry | `@deepseek-ai/dsh-tools@0.1.2-rc.1` (peer + optionalDependency) |
+| CLI | `@deepseek-ai/dsh@0.1.5-rc.3` (`npx @deepseek-ai/dsh@0.1.5-rc.3 --version`) |
+| Tool registry | `@deepseek-ai/dsh-tools@^0.1.5-rc.2` (peer, not installed into the profile) |
 | Cordis | `@deepseek-ai/cordis@^4.0.2` |
 | Node | `>=22.14.0` |
 
-Install with a clean `$DSH_HOME` and `dsh plugin --profile web add`. Do not vendor or patch DSH source. `opendesigner_status` includes `requiredDsh: "0.1.2-rc.1"`.
+Install with a clean `$DSH_HOME` and `dsh plugin --profile web add`. Do not vendor or patch DSH source. `opendesigner_status` includes `requiredDsh: "0.1.5-rc.3"`.
 
 ## Plugin contract
 
